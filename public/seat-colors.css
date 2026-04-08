@@ -1,0 +1,46 @@
+/*
+ * seat-colors.css
+ * ───────────────────────────────────────────────────────────────
+ * Add these rules to style.css (or paste into the <style> block
+ * in index.html if you have no separate style.css).
+ *
+ * Spec §6 color mapping:
+ *   Green  — .seat-available          (free to book)
+ *   Red    — .seat-reserved-permanent (driver / fixed admin seat)
+ *   Orange — .seat-reserved-temporary (temporary block, not expired)
+ *   Green  — expired temporary        (becomes .seat-available again)
+ *   Grey   — .seat-disabled           (booking closed)
+ *   Brand  — .seat-mine               (your own booking, orange brand)
+ *   Red    — .seat-taken              (taken by another staff member)
+ *
+ * These classes are applied in renderSeatGrid() inside script.js.
+ */
+
+/* ── Permanent reservation — RED ───────────────────────────── */
+.seat-reserved-permanent {
+  background:   var(--red-light);
+  border-color: var(--red-border);
+  color:        var(--red);
+  cursor:       not-allowed;
+}
+
+/* ── Active temporary reservation — ORANGE ─────────────────── */
+.seat-reserved-temporary {
+  background:   #fff7ed;
+  border-color: #fed7aa;
+  color:        #c2410c;
+  cursor:       not-allowed;
+}
+
+/*
+ * Update the legend in index.html to include:
+ *
+ *   <div class="legend-item">
+ *     <div class="legend-dot" style="background:#fee2e2;border-color:#fca5a5;"></div>
+ *     Permanent Reserved
+ *   </div>
+ *   <div class="legend-item">
+ *     <div class="legend-dot" style="background:#fff7ed;border-color:#fed7aa;"></div>
+ *     Temporary Reserved
+ *   </div>
+ */
