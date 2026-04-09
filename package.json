@@ -4,7 +4,7 @@
   "description": "Cobranet Staff Bus Booking System — MongoDB backend",
   "main": "server.js",
   "engines": {
-  "node": "24.x"
+  "node": "20.x"
 }
   },
   "dependencies": {
