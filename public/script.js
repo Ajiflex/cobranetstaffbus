@@ -576,26 +576,44 @@ function renderResultsTable(bk) {
   const dateEl = document.getElementById('results-date-text');
   if (dateEl) dateEl.textContent = formatResultsDate();
 
-  // Exclude reserved-seat placeholders from staff count
-  const entries = Object.entries(bk)
-    .filter(([, v]) => !v._reserved)
-    .sort((a, b) => Number(a[0]) - Number(b[0]));
+  // Sort all seats numerically
+  const allEntries = Object.entries(bk).sort((a, b) => Number(a[0]) - Number(b[0]));
 
-  document.getElementById('results-count').textContent = entries.length + ' staff booked';
+  // Staff count excludes reserved-seat placeholders (same logic as before)
+  const staffCount = allEntries.filter(([, v]) => !v._reserved).length;
+  document.getElementById('results-count').textContent = staffCount + ' staff booked';
+
   tbody.innerHTML = '';
 
-  if (!entries.length) {
+  if (!allEntries.length) {
     tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No bookings for today.</td></tr>';
     return;
   }
 
-  entries.forEach(([seat, info], idx) => {
+  // BUG 1 FIX: render ALL seats — confirmed bookings AND reserved seats.
+  // Previously .filter(([,v]) => !v._reserved) removed reserved seats so they
+  // never appeared on the Home Screen results table, even though they showed
+  // correctly in the admin Today's Seat Bookings tab (renderAdminBookings has
+  // no such filter). Reserved seats now render with a RESERVED badge instead
+  // of a staff name and time, matching the same seat source as the admin view.
+  let rowIndex = 1;
+  allEntries.forEach(([seat, info]) => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${idx + 1}</td>
-      <td><span class="badge badge-brand">Seat ${seat}</span></td>
-      <td>${info.name}</td>
-      <td>${info.time}</td>`;
+    if (info._reserved) {
+      // Reserved seat placeholder — show seat number and reservation type label
+      const typeLabel = info._reservationType === 'permanent' ? 'RESERVED' : 'TEMP RESERVED';
+      tr.innerHTML = `
+        <td>${rowIndex++}</td>
+        <td><span class="badge badge-brand">Seat ${seat}</span></td>
+        <td><span class="badge badge-red">${typeLabel}</span></td>
+        <td>—</td>`;
+    } else {
+      tr.innerHTML = `
+        <td>${rowIndex++}</td>
+        <td><span class="badge badge-brand">Seat ${seat}</span></td>
+        <td>${info.name}</td>
+        <td>${info.time}</td>`;
+    }
     tbody.appendChild(tr);
   });
 }
@@ -1270,6 +1288,22 @@ async function mainLoop() {
       if (el) el.textContent = formatCountdown(ms);
     }
 
+    // BUG 2 FIX (safety guard): if the results section is currently visible but
+    // getSystemState() is no longer 'results', hide it and call refreshDashboard
+    // immediately. This handles the case where isResettingCycle gets stuck true
+    // (e.g. an async error prevents it from resetting to false), which would
+    // block the normal state-change branch from ever firing refreshDashboard and
+    // leave the results screen visible indefinitely.
+    const resultsVisible = !document.getElementById('results-section').classList.contains('hidden');
+    if (resultsVisible && state !== 'results') {
+      // Force-clear results section and reset to the correct view right now,
+      // without waiting for the state-change branch below.
+      lastState = state;          // sync lastState so the branch below is skipped
+      isResettingCycle = false;   // clear any stuck flag before re-entring
+      refreshDashboard();
+      return;
+    }
+
     if (state !== lastState) {
       // ── New booking cycle detection ────────────────────────────────
       const justStartedNewCycle =
@@ -1308,6 +1342,14 @@ async function mainLoop() {
       if (!isResettingCycle) refreshDashboard();
 
     } else if (state === 'open' && now.getSeconds() % 5 === 0) {
+      refreshDashboard();
+
+    // BUG 2 FIX (periodic check): poll every 5 seconds during the results window
+    // so the transition to the next state is noticed promptly. Without this, only
+    // the state-change branch fires refreshDashboard during 'results' — which
+    // works correctly in normal flow but provides no safety net if the transition
+    // is ever missed (race condition, async failure, tab backgrounded, etc.).
+    } else if (state === 'results' && now.getSeconds() % 5 === 0) {
       refreshDashboard();
     }
   }
