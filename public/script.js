@@ -594,26 +594,17 @@ function renderResultsTable(bk) {
   // Previously .filter(([,v]) => !v._reserved) removed reserved seats so they
   // never appeared on the Home Screen results table, even though they showed
   // correctly in the admin Today's Seat Bookings tab (renderAdminBookings has
-  // no such filter). Reserved seats now render with a RESERVED badge instead
-  // of a staff name and time, matching the same seat source as the admin view.
+  // no such filter). Reserved seats now render with the label (staff/role name)
+  // and booking start time returned by the API, matching the same data source
+  // as confirmed bookings — no RESERVED badge, no dash for time.
   let rowIndex = 1;
   allEntries.forEach(([seat, info]) => {
     const tr = document.createElement('tr');
-    if (info._reserved) {
-      // Reserved seat placeholder — show seat number and reservation type label
-      const typeLabel = info._reservationType === 'permanent' ? 'RESERVED' : 'TEMP RESERVED';
-      tr.innerHTML = `
-        <td>${rowIndex++}</td>
-        <td><span class="badge badge-brand">Seat ${seat}</span></td>
-        <td><span class="badge badge-red">${typeLabel}</span></td>
-        <td>—</td>`;
-    } else {
-      tr.innerHTML = `
-        <td>${rowIndex++}</td>
-        <td><span class="badge badge-brand">Seat ${seat}</span></td>
-        <td>${info.name}</td>
-        <td>${info.time}</td>`;
-    }
+    tr.innerHTML = `
+      <td>${rowIndex++}</td>
+      <td><span class="badge badge-brand">Seat ${seat}</span></td>
+      <td>${info.name}</td>
+      <td>${info.time}</td>`;
     tbody.appendChild(tr);
   });
 }
