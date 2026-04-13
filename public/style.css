@@ -8,10 +8,10 @@
 /* ── CSS Custom Properties ──────────────────────────────────── */
 :root {
   /* Brand */
-  --brand:          #f97316;
-  --brand-dark:     #c2410c;
-  --brand-light:    #fff7ed;
-  --brand-border:   #fed7aa;
+  --brand:          #ff8210;
+  --brand-dark:     #e06800;
+  --brand-light:    #ff9d40;
+  --brand-border:   #ffd0a0;
 
   /* Neutrals */
   --bg:             #f8f7f4;
