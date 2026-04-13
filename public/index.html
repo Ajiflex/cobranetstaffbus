@@ -210,6 +210,21 @@
       <div id="seat-grid" class="seat-grid"></div>
     </section>
 
+    <!-- Verification Section (shown between booking close and results) -->
+    <section id="verification-section" class="card card-center hidden">
+      <div class="verif-spinner"></div>
+      <div class="verif-title">Verifying seat allocations…</div>
+      <p class="verif-sub text-muted">Please wait while we confirm your seat assignment.</p>
+    </section>
+
+    <!-- Grace Period Section (shown when duplicate seats were released) -->
+    <section id="grace-section" class="card card-center hidden">
+      <div class="grace-timer" id="grace-timer">2:00</div>
+      <div class="verif-title">Seats released — pick yours now</div>
+      <p class="verif-sub text-muted" id="grace-sub">Some seats have been freed. Staff without a seat may select one below.</p>
+      <div id="grace-seat-grid" class="seat-grid" style="margin-top:1.25rem;"></div>
+    </section>
+
     <!-- Results Section -->
     <section id="results-section" class="hidden">
       <div class="section-header">

@@ -342,7 +342,8 @@ async function refreshDashboard() {
   const bk    = cachedBookings;
   const s     = cachedSettings;
 
-  ['countdown-section', 'seat-section', 'results-section', 'my-booking-card']
+  ['countdown-section', 'seat-section', 'results-section',
+   'my-booking-card', 'verification-section', 'grace-section']
     .forEach(id => document.getElementById(id).classList.add('hidden'));
 
   const banner = document.getElementById('status-banner');
@@ -1251,6 +1252,196 @@ function resetSeatSelections() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// VERIFICATION PHASE
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Tracks the verification workflow state independently of getSystemState().
+ * Values: 'BOOKING_OPEN' | 'VERIFYING' | 'GRACE_PERIOD' | 'RESULT_DISPLAYED'
+ */
+let systemStatus    = 'BOOKING_OPEN';
+let graceTimerEnd   = null;   // Date when the 2-minute grace period expires
+let graceInterval   = null;   // setInterval handle for the grace countdown display
+
+/**
+ * Calls POST /api/verifySeatAllocations, which runs duplicate-seat cleanup on
+ * the server and returns the number of seats released.
+ * Returns releasedCount (0 if no duplicates found).
+ */
+async function verifySeatAllocations() {
+  try {
+    const data = await apiRequest('/verifySeatAllocations', 'POST');
+    return data.success ? (data.releasedCount || 0) : 0;
+  } catch (err) {
+    console.error('verifySeatAllocations error:', err);
+    return 0;
+  }
+}
+
+/** Hide every dashboard section at once (helper used by verification flow) */
+function hideAllSections() {
+  ['countdown-section', 'seat-section', 'results-section',
+   'my-booking-card', 'verification-section', 'grace-section']
+    .forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.classList.add('hidden');
+    });
+}
+
+/** Show the "Verifying…" loading screen */
+function showVerificationScreen() {
+  hideAllSections();
+  const banner = document.getElementById('status-banner');
+  const dot    = document.getElementById('banner-dot');
+  const txt    = document.getElementById('banner-text');
+  banner.className = 'status-banner banner-results';
+  dot.className    = 'banner-dot dot-brand';
+  txt.textContent  = '🔍 Verifying seat allocations — please wait…';
+  document.getElementById('verification-section').classList.remove('hidden');
+}
+
+/** Show the grace-period seat selection screen */
+function showGraceScreen() {
+  hideAllSections();
+  const banner = document.getElementById('status-banner');
+  const dot    = document.getElementById('banner-dot');
+  const txt    = document.getElementById('banner-text');
+  banner.className = 'status-banner banner-open';
+  dot.className    = 'banner-dot dot-green';
+  txt.textContent  = '🟢 Freed seats available — select yours before the timer runs out!';
+
+  // Only staff without a confirmed seat may pick during grace period
+  const mine = Object.entries(cachedBookings)
+    .find(([, v]) => !v._reserved && v.username === currentUser?.username);
+  const sub = document.getElementById('grace-sub');
+  if (mine) {
+    if (sub) sub.textContent = 'Your seat ' + mine[0] + ' is confirmed. No action needed.';
+  } else {
+    if (sub) sub.textContent = 'Some seats have been freed. Select an available seat below.';
+  }
+
+  // Render the seat grid inside the grace section
+  const grid = document.getElementById('grace-seat-grid');
+  if (grid) {
+    // Temporarily redirect seat-grid render into grace-seat-grid
+    const realGrid = document.getElementById('seat-grid');
+    const realGridParent = realGrid?.parentNode;
+    const placeholder = document.createComment('seat-grid-placeholder');
+    if (realGrid) {
+      realGrid.id = 'seat-grid';
+      realGridParent.replaceChild(placeholder, realGrid);
+    }
+    renderSeatGrid(cachedBookings, cachedSettings.totalSeats || 30,
+      !mine  // interactive only if staff has no seat yet
+    );
+    // Move rendered grid into the grace section
+    const rendered = document.getElementById('seat-grid');
+    if (rendered) grid.innerHTML = rendered.innerHTML;
+    // Restore original seat-grid
+    if (realGrid && placeholder.parentNode) {
+      placeholder.parentNode.replaceChild(realGrid, placeholder);
+    }
+
+    // Wire up click handlers on the grace grid buttons
+    grid.querySelectorAll('.seat-available').forEach(btn => {
+      const seatNum = parseInt(btn.querySelector('.seat-num')?.textContent, 10);
+      if (!isNaN(seatNum)) {
+        btn.onclick = async () => {
+          if (mine) {
+            showToast('You already have a seat confirmed.', 'error');
+            return;
+          }
+          btn.disabled = true;
+          await selectSeat(seatNum);
+        };
+      }
+    });
+  }
+
+  document.getElementById('grace-section').classList.remove('hidden');
+}
+
+/** Update the grace period countdown display every second */
+function tickGraceTimer() {
+  const el = document.getElementById('grace-timer');
+  if (!el || !graceTimerEnd) return;
+  const remaining = Math.max(0, graceTimerEnd - Date.now());
+  const m = Math.floor(remaining / 60000);
+  const s = Math.floor((remaining % 60000) / 1000);
+  el.textContent = m + ':' + String(s).padStart(2, '0');
+}
+
+/**
+ * Full verification workflow — called once when booking closes.
+ * Follows the state machine:
+ *   BOOKING_OPEN → VERIFYING → (GRACE_PERIOD →) RESULT_DISPLAYED
+ */
+async function runVerificationFlow() {
+  // ── Step 1: show verification loading screen for minimum 7 seconds ──
+  systemStatus = 'VERIFYING';
+  showVerificationScreen();
+
+  const verifyStart = Date.now();
+
+  // ── Step 2: call the server to clean up duplicate bookings ──────────
+  const releasedCount = await verifySeatAllocations();
+
+  // Ensure the loading screen is visible for at least 7 seconds so users
+  // can see it rather than flashing through instantly
+  const elapsed = Date.now() - verifyStart;
+  const minDisplay = 7000;
+  if (elapsed < minDisplay) {
+    await new Promise(resolve => setTimeout(resolve, minDisplay - elapsed));
+  }
+
+  // Re-fetch fresh seat data after server-side cleanup
+  await refreshBookings();
+
+  if (releasedCount > 0) {
+    // ── Step 3 & 4: seats were released — start 2-minute grace period ──
+    systemStatus  = 'GRACE_PERIOD';
+    graceTimerEnd = Date.now() + 2 * 60 * 1000;  // 2 minutes from now
+
+    showGraceScreen();
+    tickGraceTimer();  // set initial display immediately
+
+    // Update grace timer display every second
+    if (graceInterval) clearInterval(graceInterval);
+    graceInterval = setInterval(tickGraceTimer, 1000);
+
+    // ── Step 5: wait 2 minutes then verify again ────────────────────────
+    await new Promise(resolve => setTimeout(resolve, 2 * 60 * 1000));
+
+    clearInterval(graceInterval);
+    graceInterval = null;
+
+    // Second verification pass after grace period
+    systemStatus = 'VERIFYING';
+    showVerificationScreen();
+    await verifySeatAllocations();
+
+    const postGraceDelay = 4000;  // brief display of verification screen
+    await new Promise(resolve => setTimeout(resolve, postGraceDelay));
+
+    await refreshBookings();
+  }
+
+  // ── Step 6: display final results ───────────────────────────────────
+  systemStatus = 'RESULT_DISPLAYED';
+  hideAllSections();
+
+  const banner = document.getElementById('status-banner');
+  const dot    = document.getElementById('banner-dot');
+  const txt    = document.getElementById('banner-text');
+  banner.className = 'status-banner banner-results';
+  dot.className    = 'banner-dot dot-brand';
+  txt.textContent  = "📋 Booking CLOSED — Today's seat assignments are shown below.";
+
+  renderResultsTable(cachedBookings);
+  document.getElementById('results-section').classList.remove('hidden');
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MAIN LOOP
 // ═══════════════════════════════════════════════════════════════
 
@@ -1279,37 +1470,49 @@ async function mainLoop() {
       if (el) el.textContent = formatCountdown(ms);
     }
 
-    // BUG 2 FIX (safety guard): if the results section is currently visible but
-    // getSystemState() is no longer 'results', hide it and call refreshDashboard
-    // immediately. This handles the case where isResettingCycle gets stuck true
-    // (e.g. an async error prevents it from resetting to false), which would
-    // block the normal state-change branch from ever firing refreshDashboard and
-    // leave the results screen visible indefinitely.
+    // If runVerificationFlow is actively running, it owns the display.
+    // Do not allow mainLoop to overwrite the verification or grace screens.
+    if (systemStatus === 'VERIFYING' || systemStatus === 'GRACE_PERIOD') {
+      return;
+    }
+
+    // Safety guard: results section still visible but state has moved on —
+    // force-clear and refresh immediately (handles stuck isResettingCycle).
     const resultsVisible = !document.getElementById('results-section').classList.contains('hidden');
     if (resultsVisible && state !== 'results') {
-      // Force-clear results section and reset to the correct view right now,
-      // without waiting for the state-change branch below.
-      lastState = state;          // sync lastState so the branch below is skipped
-      isResettingCycle = false;   // clear any stuck flag before re-entring
+      lastState    = state;
+      isResettingCycle = false;
+      systemStatus = 'BOOKING_OPEN';
       refreshDashboard();
       return;
     }
 
     if (state !== lastState) {
-      // ── New booking cycle detection ────────────────────────────────
       const justStartedNewCycle =
         (state === 'before_open' || state === 'reset' || state === 'weekend') &&
         (lastState === 'results' || lastState === 'open' || lastState === 'reset');
 
-      // Commit lastState BEFORE any async work so subsequent ticks skip this branch
+      // Detect the exact moment booking window closes and results window begins.
+      // Instead of showing results directly, enter the verification phase.
+      const justEnteredResults =
+        state === 'results' && (lastState === 'open' || lastState === null);
+
+      // Commit lastState BEFORE async work so subsequent ticks skip this block
       lastState = state;
+
+      if (justEnteredResults && systemStatus === 'BOOKING_OPEN') {
+        // ── VERIFICATION PHASE: owned entirely by runVerificationFlow ──
+        // It sets systemStatus = 'RESULT_DISPLAYED' when the flow completes.
+        runVerificationFlow();
+        return;
+      }
 
       if (justStartedNewCycle && !isResettingCycle) {
         isResettingCycle = true;
+        systemStatus     = 'BOOKING_OPEN';  // reset for next cycle
 
         (async () => {
           try {
-            // 1. Clear MongoDB / Supabase (db-level reset)
             const result = await apiRequest('/resetBookings', 'POST');
             if (!result.success) {
               console.warn('resetBookings returned failure:', result.message);
@@ -1318,29 +1521,24 @@ async function mainLoop() {
             console.error('Cycle reset: backend call failed:', err);
           }
 
-          // 2. Clear frontend cache + DOM
           resetSeatSelections();
-
-          // 3. Re-fetch fresh data (runs expiry + validation server-side)
           await refreshDashboard();
-
           isResettingCycle = false;
         })();
 
-        return; // refreshDashboard runs inside the IIFE
+        return;
       }
 
       if (!isResettingCycle) refreshDashboard();
 
     } else if (state === 'open' && now.getSeconds() % 5 === 0) {
+      // Ensure systemStatus is reset while booking is open so the verification
+      // flow triggers cleanly when booking closes.
+      if (systemStatus !== 'BOOKING_OPEN') systemStatus = 'BOOKING_OPEN';
       refreshDashboard();
 
-    // BUG 2 FIX (periodic check): poll every 5 seconds during the results window
-    // so the transition to the next state is noticed promptly. Without this, only
-    // the state-change branch fires refreshDashboard during 'results' — which
-    // works correctly in normal flow but provides no safety net if the transition
-    // is ever missed (race condition, async failure, tab backgrounded, etc.).
     } else if (state === 'results' && now.getSeconds() % 5 === 0) {
+      // Periodic safety refresh during results window (BUG 2 fix retained).
       refreshDashboard();
     }
   }

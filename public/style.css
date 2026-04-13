@@ -8,10 +8,10 @@
 /* ── CSS Custom Properties ──────────────────────────────────── */
 :root {
   /* Brand */
-  --brand:          #ff8210;
-  --brand-dark:     #e06800;
-  --brand-light:    #ff9d40;
-  --brand-border:   #ffd0a0;
+  --brand:          #f97316;
+  --brand-dark:     #c2410c;
+  --brand-light:    #fff7ed;
+  --brand-border:   #fed7aa;
 
   /* Neutrals */
   --bg:             #f8f7f4;
@@ -1024,4 +1024,42 @@ code {
 @media (max-width: 420px) {
   .auth-shell   { padding: 1.5rem .75rem; }
   .topbar-clock { display: none; }
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   VERIFICATION & GRACE PERIOD
+═══════════════════════════════════════════════════════════════ */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.verif-spinner {
+  width:  48px;
+  height: 48px;
+  border: 4px solid var(--border);
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin .85s linear infinite;
+  margin: 0 auto 1.25rem;
+}
+
+.verif-title {
+  font-size:   1.25rem;
+  font-weight: 700;
+  color:       var(--text);
+  margin-bottom: .4rem;
+}
+
+.verif-sub {
+  font-size: .9rem;
+  margin: 0;
+}
+
+.grace-timer {
+  font-family:   var(--font-mono);
+  font-size:     clamp(2rem, 7vw, 3.5rem);
+  font-weight:   700;
+  letter-spacing: .04em;
+  color:         var(--brand);
+  margin-bottom: .5rem;
 }
