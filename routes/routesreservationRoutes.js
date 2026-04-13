@@ -59,7 +59,26 @@ async function cleanupDuplicateBookings() {
     await Promise.all(deletePromises);
     console.log(`[duplicate-cleanup] Released ${deletePromises.length} duplicate booking(s)`);
   }
+
+  // Return the number of seats released so callers can decide next step
+  return deletePromises.length;
 }
+
+// POST /api/verifySeatAllocations
+// Called by the frontend verification phase before results are displayed.
+// Runs duplicate-seat cleanup and returns how many seats were released.
+// releasedCount > 0  → grace period needed
+// releasedCount === 0 → proceed straight to results
+router.post('/verifySeatAllocations', async (req, res) => {
+  try {
+    const releasedCount = await cleanupDuplicateBookings();
+    console.log(`[verifySeatAllocations] Released ${releasedCount} seat(s)`);
+    res.json({ success: true, releasedCount });
+  } catch (err) {
+    console.error('verifySeatAllocations error:', err);
+    res.status(500).json({ success: false, message: 'Verification failed. Please try again.' });
+  }
+});
 
 // GET /api/seats - Get all seat data (bookings + reservations + settings)
 router.get('/seats', async (req, res) => {
