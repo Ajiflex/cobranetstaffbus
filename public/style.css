@@ -7,11 +7,11 @@
 
 /* ── CSS Custom Properties ──────────────────────────────────── */
 :root {
-  /* Brand */
-  --brand:          #f97316;
-  --brand-dark:     #c2410c;
-  --brand-light:    #fff7ed;
-  --brand-border:   #fed7aa;
+  /* Brand — primary #FF8210 */
+  --brand:          #FF8210;
+  --brand-dark:     #cc6600;
+  --brand-light:    #fff4e6;
+  --brand-border:   #ffd199;
 
   /* Neutrals */
   --bg:             #f8f7f4;
@@ -98,33 +98,43 @@ body {
   justify-content: center;
   min-height:      100vh;
   padding:         2rem 1rem;
-  background:      linear-gradient(160deg, #fff9f5 0%, #f8f7f4 60%, #fffbf0 100%);
+  background:      linear-gradient(160deg, #fff4e6 0%, #f8f7f4 60%, #fff8f0 100%);
 }
 
 .auth-brand {
-  display:     flex;
-  align-items: center;
-  gap:         .75rem;
-  margin-bottom: 2rem;
+  display:        flex;
+  flex-direction: column;
+  align-items:    center;
+  text-align:     center;
+  gap:            .5rem;
+  margin-bottom:  2rem;
 }
 
 .brand-logo {
   display:         flex;
   align-items:     center;
   justify-content: center;
+  margin-bottom:   .5rem;
+}
+
+.brand-logo img {
+  width:      120px;
+  height:     auto;
+  display:    block;
 }
 
 .brand-name {
-  font-weight:   700;
-  font-size:     1.3rem;
-  color:         var(--text);
-  letter-spacing: -.02em;
+  font-weight:    800;
+  font-size:      1.75rem;
+  color:          var(--text);
+  letter-spacing: -.03em;
+  line-height:    1.1;
 }
 
 .brand-sub {
-  font-size:  .78rem;
-  color:      var(--text-muted);
-  font-weight: 500;
+  font-size:      .85rem;
+  color:          var(--text-secondary);
+  font-weight:    500;
   letter-spacing: .04em;
   text-transform: uppercase;
 }
@@ -199,12 +209,12 @@ body {
 }
 
 .topbar-admin {
-  background: var(--gray-900);
-  border-bottom-color: #333;
+  background: #FF8210;
+  border-bottom-color: #cc6600;
 }
 
-.topbar-admin .topbar-name { color: #fff; }
-.topbar-admin .topbar-clock { color: var(--gray-400); }
+.topbar-admin .topbar-name  { color: #fff; font-weight: 700; }
+.topbar-admin .topbar-clock { color: rgba(255,255,255,.75); }
 
 .topbar-brand {
   display:     flex;
