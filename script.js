@@ -443,6 +443,24 @@ function getActiveReservedSeats() {
     .map(r => String(r.seat));
 }
 
+// ═══════════════════════════════════════════════════════════════
+// SEAT STATUS NORMALIZER
+//
+// Single source of truth for seat occupancy display.
+// Returns "TAKEN" for any occupied seat (booked, permanently
+// reserved, or temporarily reserved) and "AVAILABLE" otherwise.
+// Use this everywhere a seat's status label is rendered.
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * @param {boolean} isBooked      - seat exists in cachedBookings (confirmed booking)
+ * @param {object|null} reservation - active reservation from getReservationForSeat(), or null
+ * @returns {"TAKEN"|"AVAILABLE"}
+ */
+function getSeatDisplayStatus(isBooked, reservation) {
+  return (isBooked || reservation) ? 'TAKEN' : 'AVAILABLE';
+}
+
 function renderSeatGrid(bk, total, interactive) {
   const grid = document.getElementById('seat-grid');
   grid.innerHTML = '';
@@ -466,12 +484,10 @@ function renderSeatGrid(bk, total, interactive) {
       btn.disabled  = true;
 
     } else if (isReserved) {
-      // ── Reserved seat (permanent or temporary) → display as TAKEN ────────
-      // Requirement 3: only AVAILABLE and TAKEN are shown to users.
-      // Internal reservation type (permanent/temporary) is not exposed in the UI.
+      // ── Reserved seat — always displays as TAKEN ───────────────────────
+      btn.disabled = true;
       btn.classList.add('seat-taken');
-      btn.innerHTML = `<span class="seat-num">${i}</span><span class="seat-label">TAKEN</span>`;
-      btn.disabled  = true;
+      btn.innerHTML = `<span class="seat-num">${i}</span><span class="seat-label">${getSeatDisplayStatus(false, reservation)}</span>`;
 
     } else if (bk[sNum]) {
       // ── Taken by another staff member ─────────────────────────────
@@ -1149,7 +1165,7 @@ function renderReservationsList() {
 
     let meta = '';
     if (r.type === 'permanent') {
-      meta = '<span class="res-perm-badge">Permanent</span>';
+      meta = '<span class="res-perm-badge">Indefinite</span>';
     } else if (isExpired) {
       meta = '<span class="res-expired-badge">Expired ' + (r.expiresDate || '') + '</span>';
     } else {
@@ -1234,7 +1250,8 @@ function resetSeatSelections() {
 
   document.querySelectorAll('.seat-btn').forEach(btn => {
     btn.classList.remove(
-      'seat-mine', 'seat-taken', 'seat-available', 'seat-disabled'
+      'seat-mine', 'seat-taken', 'seat-available', 'seat-disabled',
+      'seat-reserved-permanent', 'seat-reserved-temporary'
     );
     btn.classList.add('seat-disabled');
     btn.disabled = true;
