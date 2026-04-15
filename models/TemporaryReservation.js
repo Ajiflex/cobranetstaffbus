@@ -46,6 +46,9 @@ reservationSchema.index({ expires_at: 1 }, {
 reservationSchema.index({ seat_number: 1, status: 1 });
 reservationSchema.index({ status: 1, reservation_type: 1 });
 
+// Req 5: compound index for efficient expiry cleanup queries (cron job + API)
+reservationSchema.index({ reservation_type: 1, expires_at: 1 });
+
 reservationSchema.set('toJSON', {
   transform: function(doc, ret) {
     ret.id = ret._id.toString();
