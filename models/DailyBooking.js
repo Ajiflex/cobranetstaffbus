@@ -26,11 +26,12 @@ const dailyBookingSchema = new mongoose.Schema({
     type: String,
     default: () => {
       const now = new Date();
-      return now.toLocaleTimeString('en-GB', { 
-        hour: '2-digit', 
-        minute: '2-digit', 
-        second: '2-digit',
-        hour12: false 
+      return now.toLocaleTimeString('en-GB', {
+        hour:     '2-digit',
+        minute:   '2-digit',
+        second:   '2-digit',
+        hour12:   false,
+        timeZone: 'Africa/Lagos'
       });
     }
   },
