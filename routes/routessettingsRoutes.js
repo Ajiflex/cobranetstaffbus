@@ -38,19 +38,29 @@ router.post('/settings', async (req, res) => {
 
     const settings = await Settings.getSettings();
     settings.booking_start_time = openTime;
-    settings.booking_end_time = closeTime;
-    settings.display_time = resultsTime;
-    settings.total_seats = parseInt(totalSeats, 10);
+    settings.booking_end_time   = closeTime;
+    settings.display_time       = resultsTime;
+    settings.total_seats        = parseInt(totalSeats, 10);
     await settings.save();
+
+    // ── Req 2: clear ALL existing bookings whenever settings change ───────
+    // Any change to booking times or seat capacity invalidates the current
+    // booking session. All seats are returned to available immediately.
+    const clearResult = await DailyBooking.deleteMany({});
+    console.log(
+      `[settings:post] Settings updated — cleared ${clearResult.deletedCount} booking(s) ` +
+      `(openTime=${openTime}, closeTime=${closeTime}, resultsTime=${resultsTime}, totalSeats=${totalSeats})`
+    );
 
     res.json({
       success: true,
-      message: 'Settings saved.',
+      message: 'Settings saved. All existing bookings have been cleared.',
+      clearedBookings: clearResult.deletedCount,
       settings: {
-        openTime: settings.booking_start_time,
-        closeTime: settings.booking_end_time,
+        openTime:    settings.booking_start_time,
+        closeTime:   settings.booking_end_time,
         resultsTime: settings.display_time,
-        totalSeats: settings.total_seats
+        totalSeats:  settings.total_seats
       }
     });
   } catch (err) {
