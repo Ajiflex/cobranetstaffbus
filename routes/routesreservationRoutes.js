@@ -144,10 +144,11 @@ router.get('/seats', async (req, res) => {
         // Format reserved_at to HH:MM:SS to match DailyBooking.booking_time format
         const reservedTime = r.reserved_at
           ? r.reserved_at.toLocaleTimeString('en-GB', {
-              hour:   '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-              hour12: false
+              hour:     '2-digit',
+              minute:   '2-digit',
+              second:   '2-digit',
+              hour12:   false,
+              timeZone: 'Africa/Lagos'
             })
           : '—';
 
