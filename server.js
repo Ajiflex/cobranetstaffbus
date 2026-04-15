@@ -35,6 +35,7 @@ app.use('/api', async (req, res, next) => {
 app.use('/api', require('./routes/staffRoutes'));
 app.use('/api', require('./routes/routesreservationRoutes'));
 app.use('/api', require('./routes/routessettingsRoutes'));
+app.use('/api/cron', require('./routes/cronRoutes'));
 
 app.use(errorHandler);
 
