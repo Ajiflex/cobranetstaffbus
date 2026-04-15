@@ -6,6 +6,12 @@
       "use": "@vercel/node"
     }
   ],
+  "crons": [
+    {
+      "path": "/api/cron/midnight-reset",
+      "schedule": "0 0 * * *"
+    }
+  ],
   "routes": [
     {
       "src": "/style.css",
