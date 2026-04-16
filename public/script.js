@@ -443,6 +443,36 @@ function getActiveReservedSeats() {
     .map(r => String(r.seat));
 }
 
+// ═══════════════════════════════════════════════════════════════
+// CENTRALISED SEAT DISPLAY STATUS  (Issue 1)
+//
+// Returns exactly one of:  'FREE' | 'TAKEN' | 'YOURS'
+//
+//   FREE  — seat has no booking and no active reservation
+//   TAKEN — seat is booked by another staff OR held by an admin reservation
+//   YOURS — seat belongs to the currently-logged-in user
+//
+// All seat-rendering code must use this function. The internal
+// reservation types ('permanent', 'temporary') and their DB labels
+// ('RSVD', 'TEMP', 'RESERVED', etc.) must never surface in the UI.
+// ═══════════════════════════════════════════════════════════════
+function getSeatDisplayStatus(seatNum, bk, currentUsername) {
+  const sNum         = String(seatNum);
+  const reservedSeats = getActiveReservedSeats();
+
+  // Current user's own confirmed booking
+  if (bk[sNum] && bk[sNum].username === (currentUsername || '').toLowerCase()) {
+    return 'YOURS';
+  }
+
+  // Booked by another staff member OR held by an admin reservation
+  if (bk[sNum] || reservedSeats.includes(sNum)) {
+    return 'TAKEN';
+  }
+
+  return 'FREE';
+}
+
 function renderSeatGrid(bk, total, interactive) {
   const grid = document.getElementById('seat-grid');
   grid.innerHTML = '';
@@ -466,17 +496,17 @@ function renderSeatGrid(bk, total, interactive) {
       btn.disabled  = true;
 
     } else if (isReserved) {
-      // ── Reserved seat — style by type ─────────────────────────────
+      // ── Reserved seat — admin-reserved, shows as TAKEN ────────────
+      // Visual colour (red vs orange) distinguishes permanent vs temporary
+      // for admin awareness, but the label is always TAKEN per spec.
       btn.disabled = true;
 
       if (reservation?.type === 'permanent') {
-        // Red — permanent reservation
         btn.classList.add('seat-reserved-permanent');
-        btn.innerHTML = `<span class="seat-num">${i}</span><span class="seat-label">RSVD</span>`;
+        btn.innerHTML = `<span class="seat-num">${i}</span><span class="seat-label">TAKEN</span>`;
       } else {
-        // Orange — active temporary reservation
         btn.classList.add('seat-reserved-temporary');
-        btn.innerHTML = `<span class="seat-num">${i}</span><span class="seat-label">TEMP</span>`;
+        btn.innerHTML = `<span class="seat-num">${i}</span><span class="seat-label">TAKEN</span>`;
       }
 
     } else if (bk[sNum]) {
