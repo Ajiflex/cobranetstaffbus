@@ -444,21 +444,33 @@ function getActiveReservedSeats() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SEAT STATUS NORMALIZER
+// CENTRALISED SEAT DISPLAY STATUS  (Issue 1)
 //
-// Single source of truth for seat occupancy display.
-// Returns "TAKEN" for any occupied seat (booked, permanently
-// reserved, or temporarily reserved) and "AVAILABLE" otherwise.
-// Use this everywhere a seat's status label is rendered.
+// Returns exactly one of:  'FREE' | 'TAKEN' | 'YOURS'
+//
+//   FREE  — seat has no booking and no active reservation
+//   TAKEN — seat is booked by another staff OR held by an admin reservation
+//   YOURS — seat belongs to the currently-logged-in user
+//
+// All seat-rendering code must use this function. The internal
+// reservation types ('permanent', 'temporary') and their DB labels
+// ('RSVD', 'TEMP', 'RESERVED', etc.) must never surface in the UI.
 // ═══════════════════════════════════════════════════════════════
+function getSeatDisplayStatus(seatNum, bk, currentUsername) {
+  const sNum         = String(seatNum);
+  const reservedSeats = getActiveReservedSeats();
 
-/**
- * @param {boolean} isBooked      - seat exists in cachedBookings (confirmed booking)
- * @param {object|null} reservation - active reservation from getReservationForSeat(), or null
- * @returns {"TAKEN"|"AVAILABLE"}
- */
-function getSeatDisplayStatus(isBooked, reservation) {
-  return (isBooked || reservation) ? 'TAKEN' : 'AVAILABLE';
+  // Current user's own confirmed booking
+  if (bk[sNum] && bk[sNum].username === (currentUsername || '').toLowerCase()) {
+    return 'YOURS';
+  }
+
+  // Booked by another staff member OR held by an admin reservation
+  if (bk[sNum] || reservedSeats.includes(sNum)) {
+    return 'TAKEN';
+  }
+
+  return 'FREE';
 }
 
 function renderSeatGrid(bk, total, interactive) {
@@ -484,10 +496,18 @@ function renderSeatGrid(bk, total, interactive) {
       btn.disabled  = true;
 
     } else if (isReserved) {
-      // ── Reserved seat — always displays as TAKEN ───────────────────────
+      // ── Reserved seat — admin-reserved, shows as TAKEN ────────────
+      // Visual colour (red vs orange) distinguishes permanent vs temporary
+      // for admin awareness, but the label is always TAKEN per spec.
       btn.disabled = true;
-      btn.classList.add('seat-taken');
-      btn.innerHTML = `<span class="seat-num">${i}</span><span class="seat-label">${getSeatDisplayStatus(false, reservation)}</span>`;
+
+      if (reservation?.type === 'permanent') {
+        btn.classList.add('seat-reserved-permanent');
+        btn.innerHTML = `<span class="seat-num">${i}</span><span class="seat-label">TAKEN</span>`;
+      } else {
+        btn.classList.add('seat-reserved-temporary');
+        btn.innerHTML = `<span class="seat-num">${i}</span><span class="seat-label">TAKEN</span>`;
+      }
 
     } else if (bk[sNum]) {
       // ── Taken by another staff member ─────────────────────────────
@@ -1165,7 +1185,7 @@ function renderReservationsList() {
 
     let meta = '';
     if (r.type === 'permanent') {
-      meta = '<span class="res-perm-badge">Indefinite</span>';
+      meta = '<span class="res-perm-badge">Permanent</span>';
     } else if (isExpired) {
       meta = '<span class="res-expired-badge">Expired ' + (r.expiresDate || '') + '</span>';
     } else {
