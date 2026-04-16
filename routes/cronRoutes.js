@@ -1,59 +1,110 @@
-const express        = require('express');
-const router         = express.Router();
-const DailyBooking   = require('../models/DailyBooking');
-const Reservation    = require('../models/TemporaryReservation');
-
-// ─────────────────────────────────────────────────────────────────────────────
+// routes/cronRoutes.js
+//
 // POST /api/cron/midnight-reset
 //
-// Called by Vercel Cron Jobs at 00:00 UTC every day (schedule: "0 0 * * *").
+// Called by Vercel Cron Jobs at 00:00 UTC every day (vercel.json: "0 0 * * *").
 // The Authorization header check guards against arbitrary public calls.
 //
-// Requirement 1 — clear ALL seat reservations at midnight.
-// Requirement 4 — delete expired temporary reservations.
-//
-// MongoDB TTL index on TemporaryReservation.expires_at already handles
-// automatic expiry, but this job provides an explicit, logged, synchronous
-// sweep to guarantee consistency and covers any TTL lag.
-// ─────────────────────────────────────────────────────────────────────────────
+// Operations (inside a transaction where supported):
+//   1. Move all active DailyBooking rows to BookingHistory
+//   2. Delete the archived DailyBooking rows (seats back to FREE)
+//   3. Delete expired temporary reservations
+//   4. Write a MIDNIGHT_RESET system-log entry
+
+const express     = require('express');
+const router      = express.Router();
+const Reservation = require('../models/TemporaryReservation');
+const SystemLog   = require('../models/SystemLog');
+const { archiveAndDeleteBookings } = require('../utils/bookingArchiver');
+
 router.post('/midnight-reset', async (req, res) => {
-  // Simple secret check so only Vercel's cron caller (or an admin) can trigger this
+  // Guard: only Vercel cron caller (or bearer-token admin) may trigger this
   const secret = req.headers['authorization'];
   if (process.env.CRON_SECRET && secret !== `Bearer ${process.env.CRON_SECRET}`) {
     return res.status(401).json({ success: false, message: 'Unauthorized.' });
   }
 
-  const startedAt = new Date().toISOString();
-  console.log(`[cron:midnight-reset] Starting daily reset at ${startedAt}`);
+  const startedAt = new Date();
+  console.log(`[cron:midnight-reset] Starting daily reset at ${startedAt.toISOString()}`);
 
   try {
-    // ── Req 1: delete ALL DailyBooking records (seats back to available) ──
-    const bookingResult = await DailyBooking.deleteMany({});
-    console.log(`[cron:midnight-reset] Deleted ${bookingResult.deletedCount} daily booking(s)`);
+    // ── Step 1 & 2: Archive ALL active bookings → BookingHistory, then delete ──
+    // archiveAndDeleteBookings uses a transaction internally (Atlas replica sets).
+    // Passing {} matches every DailyBooking document.
+    const { archived, deleted } = await archiveAndDeleteBookings({}, 'midnight_reset');
 
-    // ── Req 4: delete expired temporary reservations ─────────────────────
+    console.log(
+      `[cron:midnight-reset] Archived ${archived} booking(s) to history, ` +
+      `deleted ${deleted} DailyBooking row(s).`
+    );
+
+    // ── Step 3: Delete expired temporary reservations ─────────────────────
     const now = new Date();
     const expiredResult = await Reservation.deleteMany({
       reservation_type: 'temporary',
       $or: [
         { expires_at: { $lt: now } },
-        { status: 'expired' }
+        { status:     'expired'   }
       ]
     });
-    console.log(`[cron:midnight-reset] Deleted ${expiredResult.deletedCount} expired temporary reservation(s)`);
 
-    console.log(`[cron:midnight-reset] Completed successfully at ${new Date().toISOString()}`);
+    const expiredCount = expiredResult.deletedCount;
+    console.log(
+      `[cron:midnight-reset] Deleted ${expiredCount} expired temporary reservation(s).`
+    );
+
+    // Log expired reservation count separately if any were cleaned up
+    if (expiredCount > 0) {
+      await SystemLog.create({
+        event_type:        'TEMP_RESERVATION_EXPIRED',
+        timestamp:         now,
+        records_processed: expiredCount,
+        status:            'success',
+        details:           `Midnight cleanup removed ${expiredCount} expired temporary reservation(s).`
+      }).catch(e => console.error('[cron] SystemLog write failed:', e.message));
+    }
+
+    // ── Step 4: Write MIDNIGHT_RESET log entry ────────────────────────────
+    const completedAt = new Date();
+    await SystemLog.create({
+      event_type:        'MIDNIGHT_RESET',
+      timestamp:         startedAt,
+      records_processed: archived,
+      status:            'success',
+      details:
+        `Reset completed at ${completedAt.toISOString()}. ` +
+        `Archived: ${archived}, Deleted bookings: ${deleted}, ` +
+        `Deleted expired reservations: ${expiredCount}.`
+    }).catch(e => console.error('[cron] SystemLog write failed:', e.message));
+
+    console.log(`[cron:midnight-reset] Completed at ${completedAt.toISOString()}`);
 
     res.json({
-      success:               true,
-      message:               'Midnight reset completed.',
-      deletedBookings:       bookingResult.deletedCount,
-      deletedExpiredReservations: expiredResult.deletedCount,
-      executedAt:            startedAt
+      success:                    true,
+      message:                    'Midnight reset completed.',
+      archivedBookings:           archived,
+      deletedBookings:            deleted,
+      deletedExpiredReservations: expiredCount,
+      executedAt:                 startedAt.toISOString()
     });
+
   } catch (err) {
     console.error('[cron:midnight-reset] Error during reset:', err);
-    res.status(500).json({ success: false, message: 'Reset failed.', error: err.message });
+
+    // Attempt to log the failure
+    await SystemLog.create({
+      event_type:        'MIDNIGHT_RESET',
+      timestamp:         startedAt,
+      records_processed: 0,
+      status:            'failed',
+      details:           `Reset failed: ${err.message}`
+    }).catch(() => {});
+
+    res.status(500).json({
+      success: false,
+      message: 'Reset failed.',
+      error:   err.message
+    });
   }
 });
 

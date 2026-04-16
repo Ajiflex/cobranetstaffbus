@@ -1,21 +1,22 @@
-const express = require('express');
-const router = express.Router();
-const Settings = require('../models/Settings');
-const DailyBooking = require('../models/DailyBooking');
-const Staff = require('../models/Staff');
+// routes/settingsRoutes.js
+const express      = require('express');
+const router       = express.Router();
+const Settings     = require('../models/Settings');
+const BookingHistory = require('../models/BookingHistory');
+const { archiveAndDeleteBookings } = require('../utils/bookingArchiver');
 
 // GET /api/settings
 router.get('/settings', async (req, res) => {
   try {
     const data = await Settings.getSettings();
     res.json({
-      success: true,
+      success:  true,
       settings: {
-        id: data._id.toString(),
-        openTime: data.booking_start_time,
-        closeTime: data.booking_end_time,
+        id:          data._id.toString(),
+        openTime:    data.booking_start_time,
+        closeTime:   data.booking_end_time,
         resultsTime: data.display_time,
-        totalSeats: data.total_seats
+        totalSeats:  data.total_seats
       }
     });
   } catch (err) {
@@ -25,6 +26,8 @@ router.get('/settings', async (req, res) => {
 });
 
 // POST /api/settings
+// Saves new settings and clears (archiving first) all existing bookings,
+// because any change to booking times or seat capacity invalidates the session.
 router.post('/settings', async (req, res) => {
   try {
     const { openTime, closeTime, resultsTime, totalSeats } = req.body;
@@ -43,19 +46,18 @@ router.post('/settings', async (req, res) => {
     settings.total_seats        = parseInt(totalSeats, 10);
     await settings.save();
 
-    // ── Req 2: clear ALL existing bookings whenever settings change ───────
-    // Any change to booking times or seat capacity invalidates the current
-    // booking session. All seats are returned to available immediately.
-    const clearResult = await DailyBooking.deleteMany({});
+    // Archive all existing bookings to history before clearing them
+    const { archived, deleted } = await archiveAndDeleteBookings({}, 'settings_change');
     console.log(
-      `[settings:post] Settings updated — cleared ${clearResult.deletedCount} booking(s) ` +
+      `[settings:post] Settings updated — archived ${archived} and cleared ${deleted} booking(s) ` +
       `(openTime=${openTime}, closeTime=${closeTime}, resultsTime=${resultsTime}, totalSeats=${totalSeats})`
     );
 
     res.json({
-      success: true,
-      message: 'Settings saved. All existing bookings have been cleared.',
-      clearedBookings: clearResult.deletedCount,
+      success:         true,
+      message:         'Settings saved. All existing bookings have been archived and cleared.',
+      archivedBookings: archived,
+      clearedBookings:  deleted,
       settings: {
         openTime:    settings.booking_start_time,
         closeTime:   settings.booking_end_time,
@@ -70,26 +72,25 @@ router.post('/settings', async (req, res) => {
 });
 
 // GET /api/history
+// Returns all archived booking history from the BookingHistory collection.
+// Records survive midnight resets because they are inserted here BEFORE
+// DailyBooking rows are deleted.
 router.get('/history', async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const data = await DailyBooking.find({
-      booking_date: { $lt: today }
-    }).sort({ booking_date: -1, seat_number: 1 }).populate('staff_id', 'name username department');
+    const data = await BookingHistory.find({})
+      .sort({ bookingDate: -1, seatId: 1 });
 
     const flatHistory = data.map(row => ({
-      date: row.booking_date.toISOString().split('T')[0],
-      seat: row.seat_number,
-      name: row.staff_id ? row.staff_id.name : '',
-      username: row.staffId,
-      department: row.staff_id ? row.staff_id.department : '',
-      time: row.booking_time
+      date:       row.bookingDate.toISOString().split('T')[0],
+      seat:       row.seatId,
+      name:       row.staffName || row.staffId,
+      username:   row.staffId,
+      department: row.staffDepartment || '',
+      time:       row.startTime || ''
     }));
 
     res.json({
-      success: true,
+      success:       true,
       flatHistory,
       totalBookings: flatHistory.length
     });
@@ -100,9 +101,10 @@ router.get('/history', async (req, res) => {
 });
 
 // DELETE /api/history
+// Permanently deletes ALL booking history records.
 router.delete('/history', async (req, res) => {
   try {
-    await DailyBooking.deleteMany({});
+    await BookingHistory.deleteMany({});
     res.json({
       success: true,
       message: 'All booking history has been cleared.'
@@ -114,21 +116,25 @@ router.delete('/history', async (req, res) => {
 });
 
 // POST /api/resetBookings
+// Admin-triggered same-day reset: archives today's bookings to history,
+// then removes them from DailyBooking so seats become available again.
 router.post('/resetBookings', async (req, res) => {
   try {
-    const today = new Date();
+    const today    = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    const result = await DailyBooking.deleteMany({
-      booking_date: { $gte: today, $lt: tomorrow }
-    });
+    const { archived, deleted } = await archiveAndDeleteBookings(
+      { booking_date: { $gte: today, $lt: tomorrow } },
+      'admin_reset'
+    );
 
     res.json({
-      success: true,
-      message: "Today's bookings have been reset.",
-      deletedCount: result.deletedCount
+      success:         true,
+      message:         "Today's bookings have been archived and reset.",
+      archivedBookings: archived,
+      deletedCount:     deleted
     });
   } catch (err) {
     console.error('ResetBookings error:', err);
