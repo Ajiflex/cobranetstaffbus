@@ -1,46 +1,57 @@
 /*
  * seat-colors.css
  * ───────────────────────────────────────────────────────────────
- * Add these rules to style.css (or paste into the <style> block
- * in index.html if you have no separate style.css).
+ * Three-state seat color system.
  *
- * Spec §6 color mapping:
- *   Green  — .seat-available          (free to book)
- *   Red    — .seat-reserved-permanent (driver / fixed admin seat)
- *   Orange — .seat-reserved-temporary (temporary block, not expired)
- *   Green  — expired temporary        (becomes .seat-available again)
- *   Grey   — .seat-disabled           (booking closed)
- *   Brand  — .seat-mine               (your own booking, orange brand)
- *   Red    — .seat-taken              (taken by another staff member)
+ * FREE   — .seat-available           background: #22c55e (green)
+ * TAKEN  — .seat-taken               background: #ef4444 (red)
+ *          .seat-reserved-permanent  background: #ef4444 (red)
+ *          .seat-reserved-temporary  background: #ef4444 (red)
+ * YOURS  — .seat-mine                background: #f97316 (orange)
+ *
+ * All three reserved states (staff booking, permanent admin
+ * reservation, temporary admin reservation) render identically
+ * as TAKEN / RED. No visual distinction between them in the UI.
  *
  * These classes are applied in renderSeatGrid() inside script.js.
  */
 
-/* ── Permanent reservation — RED ───────────────────────────── */
+/* ── FREE — GREEN ────────────────────────────────────────────── */
+.seat-available {
+  background:   #22c55e;
+  border-color: #16a34a;
+  color:        #fff;
+  cursor:       pointer;
+}
+
+/* ── TAKEN — RED (staff booking) ───────────────────────────── */
+.seat-taken {
+  background:   #ef4444;
+  border-color: #dc2626;
+  color:        #fff;
+  cursor:       not-allowed;
+}
+
+/* ── TAKEN — RED (permanent admin reservation) ─────────────── */
 .seat-reserved-permanent {
-  background:   var(--red-light);
-  border-color: var(--red-border);
-  color:        var(--red);
+  background:   #ef4444;
+  border-color: #dc2626;
+  color:        #fff;
   cursor:       not-allowed;
 }
 
-/* ── Active temporary reservation — ORANGE ─────────────────── */
+/* ── TAKEN — RED (active temporary admin reservation) ─────── */
 .seat-reserved-temporary {
-  background:   #fff7ed;
-  border-color: #fed7aa;
-  color:        #FF0000;
+  background:   #ef4444;
+  border-color: #dc2626;
+  color:        #fff;
   cursor:       not-allowed;
 }
 
-/*
- * Update the legend in index.html to include:
- *
- *   <div class="legend-item">
- *     <div class="legend-dot" style="background:#fee2e2;border-color:#fca5a5;"></div>
- *     Permanent Reserved
- *   </div>
- *   <div class="legend-item">
- *     <div class="legend-dot" style="background:#fff7ed;border-color:#fed7aa;"></div>
- *     Temporary Reserved
- *   </div>
- */
+/* ── YOURS — ORANGE ─────────────────────────────────────────── */
+.seat-mine {
+  background:   #f97316;
+  border-color: #ea580c;
+  color:        #fff;
+  cursor:       default;
+}

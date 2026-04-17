@@ -400,11 +400,9 @@ body {
   flex-shrink:   0;
 }
 
-.legend-available  { background: var(--green-light);  border-color: var(--green-border); }
-.legend-mine       { background: var(--brand-light);  border-color: var(--brand); }
-.legend-taken      { background: var(--gray-200);     border-color: var(--gray-300); }
-.legend-permanent  { background: var(--red-light);    border-color: var(--red-border); }
-.legend-temporary  { background: var(--orange-light); border-color: var(--orange-border); }
+.legend-free   { background: #22c55e; border-color: #16a34a; }
+.legend-taken  { background: #ef4444; border-color: #dc2626; }
+.legend-yours  { background: #f97316; border-color: #ea580c; }
 
 /* ═══════════════════════════════════════════════════════════════
    SEAT GRID  (Spec §3, §6)
@@ -451,34 +449,34 @@ body {
   margin-top:    .1rem;
 }
 
-/* ── Available — GREEN ─────────────────────────────────────── */
+/* ── Available — FREE GREEN ────────────────────────────────── */
 .seat-available {
-  background:   var(--green-light);
-  border-color: var(--green-border);
-  color:        var(--green);
+  background:   #22c55e;
+  border-color: #16a34a;
+  color:        #fff;
 }
 .seat-available:hover:not(:disabled) {
-  background:   #dcfce7;
-  border-color: var(--green);
+  background:   #16a34a;
+  border-color: #15803d;
   transform:    translateY(-2px);
   box-shadow:   var(--shadow-md);
 }
 .seat-available:active { transform: translateY(0); }
 
-/* ── Yours / Mine — BRAND ORANGE ───────────────────────────── */
+/* ── Yours / Mine — YOURS ORANGE ───────────────────────────── */
 .seat-mine {
-  background:   var(--brand-light);
-  border-color: var(--brand);
-  color:        var(--brand-dark);
+  background:   #f97316;
+  border-color: #ea580c;
+  color:        #fff;
   cursor:       default;
-  box-shadow:   0 0 0 2px var(--brand-light), 0 0 0 4px var(--brand);
+  box-shadow:   0 0 0 2px rgba(249,115,22,.25), 0 0 0 4px #f97316;
 }
 
-/* ── Taken by another staff — GRAY ─────────────────────────── */
+/* ── Taken by another staff — TAKEN RED ────────────────────── */
 .seat-taken {
-  background:   var(--gray-100);
-  border-color: var(--gray-300);
-  color:        var(--gray-400);
+  background:   #ef4444;
+  border-color: #dc2626;
+  color:        #fff;
   cursor:       not-allowed;
 }
 
@@ -490,19 +488,19 @@ body {
   cursor:       not-allowed;
 }
 
-/* ── Permanent Reservation — RED ────────────────────────────── */
+/* ── Permanent Reservation — TAKEN RED (same as staff-taken) ── */
 .seat-reserved-permanent {
-  background:   var(--red-light);
-  border-color: var(--red-border);
-  color:        var(--red);
+  background:   #ef4444;
+  border-color: #dc2626;
+  color:        #fff;
   cursor:       not-allowed;
 }
 
-/* ── Active Temporary Reservation — ORANGE ──────────────────── */
+/* ── Active Temporary Reservation — TAKEN RED (same as staff-taken) ── */
 .seat-reserved-temporary {
-  background:   var(--orange-light);
-  border-color: var(--orange-border);
-  color:        var(--orange);
+  background:   #ef4444;
+  border-color: #dc2626;
+  color:        #fff;
   cursor:       not-allowed;
 }
 
@@ -1016,8 +1014,31 @@ code {
 /* ═══════════════════════════════════════════════════════════════
    RESPONSIVE
 ═══════════════════════════════════════════════════════════════ */
+
+/* ── 1024px — laptops / small desktops ─────────────────────── */
+@media (max-width: 1024px) {
+  .auth-card    { max-width: 420px; padding: 2.25rem 1.75rem; }
+  .admin-main   { max-width: 100%; }
+  .stats-row    { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* ── 768px — tablets ────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .auth-shell   { padding: 1.5rem 1rem; }
+  .auth-card    { padding: 2rem 1.5rem; }
+  .brand-name   { font-size: 1.5rem; }
+  .auth-brand   { margin-bottom: 1.5rem; }
+  .topbar       { padding: 0 1rem; }
+  .dashboard-main,
+  .admin-main   { padding: 1rem .75rem 3rem; }
+  .stats-row    { grid-template-columns: repeat(2, 1fr); }
+  .seat-grid    { grid-template-columns: repeat(auto-fill, minmax(54px, 1fr)); gap: .45rem; }
+  .booking-badge-num { font-size: 1.5rem; }
+}
+
+/* ── 600px — large phones ───────────────────────────────────── */
 @media (max-width: 600px) {
-  .auth-card          { padding: 2rem 1.25rem; }
+  .auth-card          { padding: 1.75rem 1.25rem; }
   .topbar             { padding: 0 1rem; }
   .dashboard-main,
   .admin-main         { padding: 1rem .75rem 3rem; }
@@ -1031,8 +1052,29 @@ code {
   .modal-box          { margin: 0; border-radius: var(--r-lg); }
 }
 
+/* ── 480px — phones ─────────────────────────────────────────── */
+@media (max-width: 480px) {
+  .auth-shell   { padding: 1.25rem .75rem; align-items: stretch; }
+  .auth-card    {
+    padding:       1.5rem 1rem;
+    width:         100%;
+    max-width:     100%;
+    border-radius: var(--r-lg);
+  }
+  .auth-brand   { margin-bottom: 1.25rem; }
+  .brand-logo img { width: 80px; }
+  .brand-name   { font-size: 1.35rem; }
+  .auth-title   { font-size: 1.35rem; }
+  .btn-full     { height: 46px; font-size: .95rem; }
+  .seat-grid    { grid-template-columns: repeat(auto-fill, minmax(48px, 1fr)); gap: .35rem; }
+  .stats-row    { grid-template-columns: repeat(2, 1fr); }
+  .tabs-bar     { gap: 0; }
+  .tab-btn      { padding: .55rem .75rem; font-size: .8rem; }
+}
+
+/* ── 420px — small phones ───────────────────────────────────── */
 @media (max-width: 420px) {
-  .auth-shell   { padding: 1.5rem .75rem; }
+  .auth-shell   { padding: 1rem .5rem; }
   .topbar-clock { display: none; }
 }
 
