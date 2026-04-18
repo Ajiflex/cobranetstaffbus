@@ -1,13 +1,17 @@
 // routes/reservationRoutes.js
-const express     = require('express');
-const router      = express.Router();
-const Reservation = require('../models/TemporaryReservation');
+const express      = require('express');
+const router       = express.Router();
+const mongoose     = require('mongoose');
+const Reservation  = require('../models/TemporaryReservation');
 const DailyBooking = require('../models/DailyBooking');
-const Staff       = require('../models/Staff');
-const Settings    = require('../models/Settings');
-const SystemLog   = require('../models/SystemLog');
+const Staff        = require('../models/Staff');
+const Settings     = require('../models/Settings');
+const SystemLog    = require('../models/SystemLog');
 
-// Helper to get today's date range
+// ─────────────────────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
 const getTodayRange = () => {
   const now   = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -15,17 +19,28 @@ const getTodayRange = () => {
   return { start, end };
 };
 
+// Structured conflict/error logger — satisfies Step 7 logging requirement.
+function logBookingEvent(level, event, { staffId, seatId, message, extra } = {}) {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    event,
+    staffId:   staffId  || '—',
+    seatId:    seatId   || '—',
+    message:   message  || '',
+    ...extra
+  };
+  if (level === 'warn')  console.warn( `[booking:${event}]`, JSON.stringify(entry));
+  else if (level === 'error') console.error(`[booking:${event}]`, JSON.stringify(entry));
+  else                        console.log(  `[booking:${event}]`, JSON.stringify(entry));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// ISSUE 4 — TEMPORARY SEAT EXPIRATION
+// TEMPORARY RESERVATION EXPIRY CLEANUP
 //
-// Finds temporary reservations whose expires_at has passed, deletes them, and
-// writes a TEMP_RESERVATION_EXPIRED system-log entry.
-//
-// Called on every GET /api/seats so seats are freed immediately without
-// relying on the MongoDB TTL index lag (TTL runs every ~60 s by default).
-// Also called before POST /api/bookSeat allocation.
-//
-// Safe to call concurrently — deleteMany is idempotent.
+// Called from GET /seats so expired admin reservations are freed before the
+// seat map is rendered. NOT called inside bookSeat — the reservation check
+// inside bookSeat uses `expires_at: { $gt: now }` which already excludes
+// expired records at the database level without needing a separate cleanup.
 // ─────────────────────────────────────────────────────────────────────────────
 async function cleanupExpiredTemporaryReservations() {
   const now = new Date();
@@ -34,19 +49,19 @@ async function cleanupExpiredTemporaryReservations() {
     reservation_type: 'temporary',
     status:           'active',
     expires_at:       { $lt: now }
-  }).select('_id seat_number expires_at');
+  }).select('_id seat_number expires_at').lean();
 
   if (expired.length === 0) return 0;
 
-  const ids = expired.map(r => r._id);
+  const ids   = expired.map(r => r._id);
+  const seats = expired.map(r => r.seat_number).join(', ');
+
   await Reservation.deleteMany({ _id: { $in: ids } });
 
-  const seats = expired.map(r => r.seat_number).join(', ');
-  console.log(
-    `[cleanup] Expired and deleted ${expired.length} temporary reservation(s): seats ${seats}`
-  );
+  logBookingEvent('info', 'TEMP_RESERVATION_EXPIRED', {
+    message: `Deleted ${expired.length} expired reservation(s): seats ${seats}`
+  });
 
-  // ISSUE 5 — log the expiry event (non-fatal)
   await SystemLog.create({
     event_type:        'TEMP_RESERVATION_EXPIRED',
     timestamp:         now,
@@ -59,14 +74,22 @@ async function cleanupExpiredTemporaryReservations() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DUPLICATE SEAT VALIDATION
+// DUPLICATE BOOKING CLEANUP
+//
+// POST-BOOKING verification sweep.  Used by GET /seats and the
+// /verifySeatAllocations endpoint ONLY.
+//
+// NOT called inside the bookSeat critical path — calling a full collection
+// scan on every booking request is O(n) per request and causes timeouts when
+// 50 staff book simultaneously.  The unique indexes on DailyBooking provide
+// atomic duplicate prevention at insert time without a pre-flight scan.
 // ─────────────────────────────────────────────────────────────────────────────
 async function cleanupDuplicateBookings() {
   const { start: todayStart, end: todayEnd } = getTodayRange();
 
   const todayBookings = await DailyBooking.find({
     booking_date: { $gte: todayStart, $lt: todayEnd }
-  }).sort({ created_at: 1, _id: 1 });
+  }).select('staffId seat_number created_at _id').sort({ created_at: 1, _id: 1 }).lean();
 
   const byStaff = {};
   todayBookings.forEach(b => {
@@ -75,33 +98,126 @@ async function cleanupDuplicateBookings() {
     byStaff[key].push(b);
   });
 
-  const deletePromises = [];
+  const idsToDelete = [];
   Object.values(byStaff).forEach(bookings => {
     if (bookings.length > 1) {
-      const extras = bookings.slice(1);
-      extras.forEach(extra => {
-        console.log(
-          `[duplicate-cleanup] Releasing extra seat ${extra.seat_number} ` +
-          `for user ${extra.staffId} (keeping seat ${bookings[0].seat_number})`
-        );
-        deletePromises.push(DailyBooking.findByIdAndDelete(extra._id));
+      bookings.slice(1).forEach(extra => {
+        logBookingEvent('warn', 'DUPLICATE_DETECTED', {
+          staffId: extra.staffId,
+          seatId:  extra.seat_number,
+          message: `Releasing duplicate seat; keeping seat ${bookings[0].seat_number}`
+        });
+        idsToDelete.push(extra._id);
       });
     }
   });
 
-  if (deletePromises.length > 0) {
-    await Promise.all(deletePromises);
-    console.log(`[duplicate-cleanup] Released ${deletePromises.length} duplicate booking(s)`);
+  if (idsToDelete.length > 0) {
+    await DailyBooking.deleteMany({ _id: { $in: idsToDelete } });
+    logBookingEvent('warn', 'DUPLICATE_CLEANUP', {
+      message: `Released ${idsToDelete.length} duplicate booking(s)`
+    });
   }
 
-  return deletePromises.length;
+  return idsToDelete.length;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ATOMIC BOOKING CORE
+//
+// Executes the seat-change sequence (delete old booking + create new one)
+// inside a MongoDB session transaction so the two writes are atomic.
+//
+// If the MongoDB deployment does not support multi-document transactions
+// (standalone instance, no replica set), this falls back to a non-transactional
+// sequential write and relies on the unique indexes as the final guard.
+//
+// Unique indexes on DailyBooking:
+//   { staffId, booking_date }    — one seat per staff per day
+//   { seat_number, booking_date } — one staff per seat per day
+//
+// Any violation of either index results in a MongoServerError with code 11000.
+// ─────────────────────────────────────────────────────────────────────────────
+async function atomicBookSeat({ staffIdLower, staffObjectId, seatNum, todayStart, todayEnd }) {
+  let session = null;
+
+  try {
+    session = await mongoose.startSession();
+
+    let newBooking = null;
+
+    await session.withTransaction(async () => {
+      // ── Step A: Re-check seat availability inside the transaction ──────
+      // This read uses the session so it observes the transaction's snapshot,
+      // preventing another concurrent transaction from slipping in the same seat.
+      const seatTaken = await DailyBooking.findOne({
+        seat_number:  seatNum,
+        booking_date: { $gte: todayStart, $lt: todayEnd }
+      }).session(session).lean();
+
+      if (seatTaken) {
+        const err = new Error('SEAT_TAKEN');
+        err.code  = 'SEAT_TAKEN';
+        throw err;
+      }
+
+      // ── Step B: Remove any existing booking for this staff (seat change) ─
+      // deleteOne is idempotent; if no booking exists it simply deletes 0 docs.
+      await DailyBooking.deleteOne({
+        staffId:      staffIdLower,
+        booking_date: { $gte: todayStart, $lt: todayEnd }
+      }).session(session);
+
+      // ── Step C: Create the new booking ────────────────────────────────
+      // create() with a session requires an array argument.
+      const docs = await DailyBooking.create([{
+        staff_id:     staffObjectId,
+        staffId:      staffIdLower,
+        seat_number:  seatNum,
+        booking_date: todayStart
+      }], { session });
+
+      newBooking = docs[0];
+    });
+
+    return { newBooking };
+
+  } catch (err) {
+    throw err; // caller handles all error classification
+  } finally {
+    if (session) await session.endSession().catch(() => {});
+  }
+}
+
+// Non-transactional fallback (standalone MongoDB without replica set)
+async function nonTransactionalBookSeat({ staffIdLower, staffObjectId, seatNum, todayStart, todayEnd }) {
+  // Remove old booking atomically before creating the new one.
+  // The unique index on {staffId, booking_date} ensures only one document
+  // exists per staff per day. If two concurrent requests both reach this
+  // point, the second create will fail with 11000 which the caller handles.
+  await DailyBooking.deleteOne({
+    staffId:      staffIdLower,
+    booking_date: { $gte: todayStart, $lt: todayEnd }
+  });
+
+  const newBooking = await DailyBooking.create({
+    staff_id:     staffObjectId,
+    staffId:      staffIdLower,
+    seat_number:  seatNum,
+    booking_date: todayStart
+  });
+
+  return { newBooking };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/verifySeatAllocations
+// POST-booking sweep called by the frontend after the booking window closes.
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/verifySeatAllocations', async (req, res) => {
   try {
     const releasedCount = await cleanupDuplicateBookings();
-    console.log(`[verifySeatAllocations] Released ${releasedCount} seat(s)`);
+    logBookingEvent('info', 'VERIFY_COMPLETE', { message: `Released ${releasedCount} seat(s)` });
     res.json({ success: true, releasedCount });
   } catch (err) {
     console.error('verifySeatAllocations error:', err);
@@ -109,20 +225,19 @@ router.post('/verifySeatAllocations', async (req, res) => {
   }
 });
 
-// GET /api/seats — Get all seat data (bookings + reservations + settings)
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/seats
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/seats', async (req, res) => {
   try {
-    // ── Step 1: Expire and remove stale temporary reservations ────────────
-    // This makes Vercel Free plan work without per-minute cron jobs.
+    // Free expired admin reservations before building the seat map
     await cleanupExpiredTemporaryReservations();
-
-    // ── Step 2: Duplicate-seat validation ─────────────────────────────────
+    // Sweep for any duplicates left by previous concurrency edge cases
     await cleanupDuplicateBookings();
 
     const { start: todayStart, end: todayEnd } = getTodayRange();
     const todayStr = todayStart.toISOString().split('T')[0];
 
-    // ── Step 3: Fetch confirmed bookings (DailyBooking) ───────────────────
     const bookingRows = await DailyBooking.find({
       booking_date: { $gte: todayStart, $lt: todayEnd }
     }).populate('staff_id', 'name username department');
@@ -138,8 +253,7 @@ router.get('/seats', async (req, res) => {
       };
     });
 
-    // ── Step 4: Fetch active reservations (TemporaryReservation) ─────────
-    const now = new Date();
+    const now     = new Date();
     const resRows = await Reservation.find({
       status: 'active',
       $or: [
@@ -159,20 +273,15 @@ router.get('/seats', async (req, res) => {
       reservedAt:  r.reserved_at.toISOString()
     }));
 
-    // ── Step 5: Merge reserved seats into the bookings map ────────────────
     resRows.forEach(r => {
       const sNum = String(r.seat_number);
       if (!bookings[sNum]) {
         const reservedTime = r.reserved_at
           ? r.reserved_at.toLocaleTimeString('en-GB', {
-              hour:     '2-digit',
-              minute:   '2-digit',
-              second:   '2-digit',
-              hour12:   false,
-              timeZone: 'Africa/Lagos'
+              hour: '2-digit', minute: '2-digit', second: '2-digit',
+              hour12: false, timeZone: 'Africa/Lagos'
             })
           : '—';
-
         bookings[sNum] = {
           username:         r.label,
           name:             r.label,
@@ -185,7 +294,6 @@ router.get('/seats', async (req, res) => {
       }
     });
 
-    // ── Step 6: Fetch settings ────────────────────────────────────────────
     const settingsDoc = await Settings.getSettings();
     const settings = {
       id:          settingsDoc._id.toString(),
@@ -195,43 +303,65 @@ router.get('/seats', async (req, res) => {
       totalSeats:  settingsDoc.total_seats
     };
 
-    res.json({
-      success: true,
-      bookings,
-      reservations,
-      settings
-    });
+    res.json({ success: true, bookings, reservations, settings });
   } catch (err) {
     console.error('Seats API error:', err);
     res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   }
 });
 
-// POST /api/bookSeat — Book a seat
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/bookSeat
+//
+// Security model:
+//
+//   Layer 1 — Admin reservation check (Reservation collection)
+//     Seat is blocked by admin? → 409 immediately (no DB write attempted)
+//
+//   Layer 2 — Atomic transaction (MongoDB session)
+//     Re-read seat availability INSIDE the transaction so concurrent requests
+//     cannot both pass the check and both write.
+//     Delete old booking (if staff is changing seats) INSIDE the transaction.
+//     Create new booking INSIDE the transaction.
+//     On any failure → ROLLBACK (no partial state).
+//
+//   Layer 3 — Unique index enforcement (database level)
+//     { staffId, booking_date }     — one seat per staff per day
+//     { seat_number, booking_date } — one seat per staff, one staff per seat
+//     Any concurrent request that races past Layer 2 is caught here by
+//     MongoDB raising a duplicate key error (code 11000).
+//     This layer works even without replica-set transactions.
+//
+//   Layer 4 — Fallback non-transactional path
+//     If the MongoDB deployment does not support sessions (standalone),
+//     Layer 2 is skipped. Layers 1, 3, and 4 still protect correctness.
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/bookSeat', async (req, res) => {
+  const { seatNumber, userId, username, name } = req.body;
+
+  // ── Input validation ────────────────────────────────────────────────────
+  if (!seatNumber || !userId || !username) {
+    return res.status(400).json({
+      success: false,
+      message: 'Missing required fields: seatNumber, userId, username'
+    });
+  }
+
+  const seatNum = parseInt(seatNumber, 10);
+  if (isNaN(seatNum) || seatNum < 1 || seatNum > 60) {
+    return res.status(400).json({ success: false, message: 'Invalid seat number.' });
+  }
+
+  const staffIdLower   = username.toLowerCase().trim();
+  const staffObjectId  = userId;
+  const { start: todayStart, end: todayEnd } = getTodayRange();
+  const now            = new Date();
+
   try {
-    const { seatNumber, userId, username, name } = req.body;
-
-    if (!seatNumber || !userId || !username) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing required fields: seatNumber, userId, username'
-      });
-    }
-
-    const seatNum = parseInt(seatNumber, 10);
-    if (isNaN(seatNum) || seatNum < 1) {
-      return res.status(400).json({ success: false, message: 'Invalid seat number.' });
-    }
-
-    // Expire stale temporary reservations before allocation
-    await cleanupExpiredTemporaryReservations();
-    await cleanupDuplicateBookings();
-
-    const { start: todayStart, end: todayEnd } = getTodayRange();
-    const now = new Date();
-
-    // Check if seat is reserved
+    // ── Layer 1: Admin reservation guard ──────────────────────────────────
+    // Checked outside the transaction because reservation records change
+    // rarely (admin action) and this read does not need to be serialised
+    // with the booking write.
     const reservation = await Reservation.findOne({
       seat_number: seatNum,
       status:      'active',
@@ -239,48 +369,68 @@ router.post('/bookSeat', async (req, res) => {
         { reservation_type: 'permanent' },
         { reservation_type: 'temporary', expires_at: { $gt: now } }
       ]
-    });
+    }).lean();
 
     if (reservation) {
+      logBookingEvent('warn', 'SEAT_RESERVED_BLOCKED', {
+        staffId: staffIdLower, seatId: seatNum,
+        message: `Seat blocked by ${reservation.reservation_type} admin reservation`
+      });
       return res.status(409).json({
         success: false,
         message: `Seat ${seatNum} is reserved and unavailable.`
       });
     }
 
-    // Check if seat is already booked today
-    const existingBooking = await DailyBooking.findOne({
-      seat_number:  seatNum,
-      booking_date: { $gte: todayStart, $lt: todayEnd }
-    });
+    // ── Layers 2 + 3: Atomic booking ──────────────────────────────────────
+    let newBooking;
 
-    if (existingBooking) {
-      return res.status(409).json({
-        success:  false,
-        message:  `Seat ${seatNum} was just taken — please choose another.`,
-        conflict: true
-      });
+    try {
+      // Attempt transactional path (Atlas / replica-set deployments)
+      ({ newBooking } = await atomicBookSeat({
+        staffIdLower, staffObjectId, seatNum, todayStart, todayEnd
+      }));
+
+    } catch (txErr) {
+      // ── Custom application error thrown from inside transaction ──────────
+      if (txErr.code === 'SEAT_TAKEN') {
+        logBookingEvent('warn', 'SEAT_CONFLICT', {
+          staffId: staffIdLower, seatId: seatNum,
+          message: 'Seat taken — detected inside transaction'
+        });
+        return res.status(409).json({
+          success:  false,
+          message:  `Seat ${seatNum} was just taken — please choose another.`,
+          conflict: true
+        });
+      }
+
+      // ── Transaction not supported (standalone MongoDB) → fallback ───────
+      const isSessionError =
+        txErr.message && (
+          txErr.message.includes('Transaction') ||
+          txErr.message.includes('session')     ||
+          txErr.message.includes('replica')     ||
+          txErr.message.includes('startSession')
+        );
+
+      if (isSessionError) {
+        // Layer 4 fallback: non-transactional sequential writes.
+        // Unique indexes (Layer 3) are the final guard here.
+        ({ newBooking } = await nonTransactionalBookSeat({
+          staffIdLower, staffObjectId, seatNum, todayStart, todayEnd
+        }));
+      } else {
+        throw txErr; // re-throw unexpected errors to outer catch
+      }
     }
 
-    // If staff already has a booking today, release it (seat change)
-    const staffBooking = await DailyBooking.findOne({
-      staffId:      username.toLowerCase(),
-      booking_date: { $gte: todayStart, $lt: todayEnd }
+    logBookingEvent('info', 'BOOKING_CREATED', {
+      staffId: staffIdLower, seatId: seatNum,
+      message: `Seat ${seatNum} booked successfully`
     });
 
-    if (staffBooking) {
-      await DailyBooking.findByIdAndDelete(staffBooking._id);
-    }
-
-    // Create new booking
-    const newBooking = await DailyBooking.create({
-      staff_id:     userId,
-      staffId:      username.toLowerCase(),
-      seat_number:  seatNum,
-      booking_date: todayStart
-    });
-
-    res.json({
+    return res.json({
       success: true,
       message: `Seat ${seatNum} reserved!`,
       booking: {
@@ -291,23 +441,74 @@ router.post('/bookSeat', async (req, res) => {
         date: todayStart.toISOString().split('T')[0]
       }
     });
+
   } catch (err) {
-    console.error('BookSeat error:', err);
+    // ── Layer 3: Unique index violation ─────────────────────────────────
     if (err.code === 11000) {
+      const keyPattern = err.keyPattern || {};
+
+      if (keyPattern.seat_number) {
+        logBookingEvent('warn', 'SEAT_CONFLICT', {
+          staffId: staffIdLower, seatId: seatNum,
+          message: 'Unique index violation — seat_number+booking_date'
+        });
+        return res.status(409).json({
+          success:  false,
+          message:  `Seat ${seatNum} was just taken — please choose another.`,
+          conflict: true
+        });
+      }
+
+      if (keyPattern.staffId) {
+        logBookingEvent('warn', 'STAFF_DUPLICATE', {
+          staffId: staffIdLower, seatId: seatNum,
+          message: 'Unique index violation — staffId+booking_date'
+        });
+        return res.status(409).json({
+          success:  false,
+          message:  'You already have a seat booked for today.',
+          conflict: true
+        });
+      }
+
+      // Unknown 11000 (belt-and-suspenders)
+      logBookingEvent('warn', 'DUPLICATE_KEY_UNKNOWN', {
+        staffId: staffIdLower, seatId: seatNum,
+        message: `11000 on unknown key: ${JSON.stringify(keyPattern)}`
+      });
       return res.status(409).json({
         success:  false,
-        message:  'Seat already taken or staff already has a seat today.',
+        message:  'Booking conflict — please try again.',
         conflict: true
       });
     }
-    res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+
+    // ── Transaction abort / transient error ────────────────────────────
+    if (err.errorLabels && err.errorLabels.includes('TransientTransactionError')) {
+      logBookingEvent('warn', 'TRANSIENT_TX_ERROR', {
+        staffId: staffIdLower, seatId: seatNum,
+        message: err.message
+      });
+      return res.status(409).json({
+        success:  false,
+        message:  'Booking conflict — please try again.',
+        conflict: true
+      });
+    }
+
+    logBookingEvent('error', 'BOOKING_ERROR', {
+      staffId: staffIdLower, seatId: seatNum,
+      message: err.message
+    });
+    return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   }
 });
 
-// GET /api/reservations — List active reservations
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/reservations
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/reservations', async (req, res) => {
   try {
-    // Expire stale reservations before returning the list
     await cleanupExpiredTemporaryReservations();
 
     const now  = new Date();
@@ -337,22 +538,22 @@ router.get('/reservations', async (req, res) => {
   }
 });
 
-// POST /api/reservations — Create reservation
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/reservations
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/reservations', async (req, res) => {
   try {
     const { seat, label, type, days } = req.body;
 
     if (!seat || !label || !type) {
       return res.status(400).json({
-        success: false,
-        message: 'seat, label, and type are required.'
+        success: false, message: 'seat, label, and type are required.'
       });
     }
 
     if (!['permanent', 'temporary'].includes(type)) {
       return res.status(400).json({
-        success: false,
-        message: 'type must be "permanent" or "temporary".'
+        success: false, message: 'type must be "permanent" or "temporary".'
       });
     }
 
@@ -361,7 +562,6 @@ router.post('/reservations', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid seat number.' });
     }
 
-    // Clean up expired before checking conflicts
     await cleanupExpiredTemporaryReservations();
 
     const now      = new Date();
@@ -414,30 +614,25 @@ router.post('/reservations', async (req, res) => {
     console.error('Reservations POST error:', err);
     if (err.code === 11000) {
       return res.status(409).json({
-        success: false,
-        message: 'Seat already has an active reservation.'
+        success: false, message: 'Seat already has an active reservation.'
       });
     }
     res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   }
 });
 
-// DELETE /api/reservations — Remove reservation
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/reservations
+// ─────────────────────────────────────────────────────────────────────────────
 router.delete('/reservations', async (req, res) => {
   try {
     const { seat } = req.body;
-
     if (!seat) {
       return res.status(400).json({ success: false, message: 'seat is required.' });
     }
-
     const seatNum = parseInt(seat, 10);
     await Reservation.deleteOne({ seat_number: seatNum });
-
-    res.json({
-      success: true,
-      message: `Reservation for Seat ${seatNum} removed.`
-    });
+    res.json({ success: true, message: `Reservation for Seat ${seatNum} removed.` });
   } catch (err) {
     console.error('Reservations DELETE error:', err);
     res.status(500).json({ success: false, message: 'Server error. Please try again.' });
