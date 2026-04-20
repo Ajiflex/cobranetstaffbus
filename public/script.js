@@ -82,13 +82,14 @@ async function doLogin() {
 
       // Persist session so refresh does not log the user out
       localStorage.setItem('cobranet_user', JSON.stringify({
-        _id:          currentUser._id,
-        id:           currentUser._id,
-        name:         currentUser.name,
-        username:     currentUser.username,
-        department:   currentUser.department || '',
-        role:         currentUser.role,
-        mustChangePw: currentUser.mustChangePw || false
+        _id:            currentUser._id,
+        id:             currentUser._id,
+        name:           currentUser.name,
+        username:       currentUser.username,
+        department:     currentUser.department || '',
+        role:           currentUser.role,
+        mustChangePw:   currentUser.mustChangePw || false,
+        sessionVersion: currentUser.sessionVersion || 1
       }));
 
       document.getElementById('login-error').classList.add('hidden');
@@ -188,13 +189,14 @@ async function doChangePassword() {
 
       // Refresh stored session with cleared mustChangePw flag
       localStorage.setItem('cobranet_user', JSON.stringify({
-        _id:          currentUser._id,
-        id:           currentUser._id,
-        name:         currentUser.name,
-        username:     currentUser.username,
-        department:   currentUser.department || '',
-        role:         currentUser.role,
-        mustChangePw: false
+        _id:            currentUser._id,
+        id:             currentUser._id,
+        name:           currentUser.name,
+        username:       currentUser.username,
+        department:     currentUser.department || '',
+        role:           currentUser.role,
+        mustChangePw:   false,
+        sessionVersion: currentUser.sessionVersion || 1
       }));
 
       err.classList.add('hidden');
@@ -245,6 +247,24 @@ async function refreshBookings() {
       cachedBookings     = seatsData.bookings     || {};
       cachedReservations = seatsData.reservations || [];
       cachedSettings     = seatsData.settings     || cachedSettings;
+
+      // ── Session version check (forced-logout detection) ──────────────
+      // If an admin has called POST /api/forceLogoutAll, the server increments
+      // session_version.  We compare it against the value stored at login.
+      // A mismatch means this session is no longer valid → log out immediately.
+      const serverVersion = seatsData.settings && seatsData.settings.sessionVersion;
+      if (serverVersion && currentUser) {
+        const stored = parseInt(
+          (JSON.parse(localStorage.getItem('cobranet_user') || '{}').sessionVersion) || 1,
+          10
+        );
+        if (serverVersion > stored) {
+          console.warn('[session] Version mismatch — forcing logout. Server:', serverVersion, 'Stored:', stored);
+          doLogout();
+          showToast('⚠️ Your session has been ended by an administrator. Please log in again.', 'error');
+          return;
+        }
+      }
     }
   } catch (err) {
     console.error('refreshBookings error:', err);
@@ -534,6 +554,8 @@ function renderSeatGrid(bk, total, interactive) {
 
 async function selectSeat(num) {
   if (!currentUser) return;
+  // Note: client-side state check is for UX only (hides the button).
+  // The real enforcement is server-side in POST /api/bookSeat.
   if (getSystemState() !== 'open') {
     showToast('Seat booking is not open right now.', 'error');
     return;
@@ -567,10 +589,12 @@ async function selectSeat(num) {
       showToast('✅ Seat ' + num + ' reserved!', 'success');
       refreshDashboard();
     } else {
+      // Show the server's message verbatim — it may contain the authoritative
+      // window time (e.g. "Booking window has not opened yet. Opens at 07:00").
       showToast(data.message || 'Failed to book seat.', 'error');
       refreshDashboard();
     }
-  } catch {
+  } catch (err) {
     showToast('Network error. Please try again.', 'error');
   }
 }
@@ -977,6 +1001,32 @@ function confirmResetBookings() {
               showToast("Today's bookings reset.", '');
             } else {
               showToast(data.message || 'Failed to reset.', 'error');
+            }
+          } catch {
+            showToast('Network error.', 'error');
+          }
+        }
+      }
+    ]
+  );
+}
+
+function confirmForceLogoutAll() {
+  openModal('Force Logout All Users',
+    `<p class="text-sm">This will immediately log out <strong>all active users</strong>. They will be prompted to log in again on their next page refresh.<br><br>No data will be deleted.</p>`,
+    [
+      { label: 'Cancel', cls: 'btn-secondary', fn: closeModal },
+      {
+        label: 'Force Logout All',
+        cls:   'btn-danger',
+        fn:    async () => {
+          try {
+            const data = await apiRequest('/forceLogoutAll', 'POST');
+            if (data.success) {
+              closeModal();
+              showToast('✅ All sessions invalidated. Users will be logged out on next poll.', 'success');
+            } else {
+              showToast(data.message || 'Failed to force logout.', 'error');
             }
           } catch {
             showToast('Network error.', 'error');
@@ -1599,6 +1649,8 @@ document.addEventListener('keydown', e => {
 
 async function restoreSession(user) {
   currentUser = user;
+  // Ensure sessionVersion is always a number on the restored object
+  if (!currentUser.sessionVersion) currentUser.sessionVersion = 1;
   if (currentUser.mustChangePw) {
     showPage('page-change-password');
     return;

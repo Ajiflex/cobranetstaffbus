@@ -9,6 +9,60 @@ const Settings     = require('../models/Settings');
 const SystemLog    = require('../models/SystemLog');
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SERVER TIME HELPERS  (Africa/Lagos — WAT, UTC+1, no DST)
+//
+// All booking-window comparisons use the SERVER clock, not the client's device
+// time.  This prevents staff from bypassing the booking window by changing the
+// clock on their phone or computer.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns the current server minute-of-day in Africa/Lagos local time.
+ * e.g. 17:05 WAT → 1025
+ */
+function getServerLagosMinuteOfDay() {
+  const now   = new Date();
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Lagos',
+    hour:     '2-digit',
+    minute:   '2-digit',
+    hour12:   false
+  }).formatToParts(now);
+  const h = parseInt(parts.find(p => p.type === 'hour').value,   10);
+  const m = parseInt(parts.find(p => p.type === 'minute').value, 10);
+  return h * 60 + m;
+}
+
+/**
+ * Returns 0 (Sun) … 6 (Sat) in Africa/Lagos local time.
+ */
+function getServerLagosDayOfWeek() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Lagos',
+    weekday:  'short'
+  }).formatToParts(now);
+  const name = parts.find(p => p.type === 'weekday').value; // 'Mon', 'Tue', ...
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(name);
+}
+
+/**
+ * Returns the current server ISO timestamp string (UTC).
+ */
+function getServerISOTime() {
+  return new Date().toISOString();
+}
+
+/**
+ * Parse a "HH:MM" settings string → total minutes since midnight.
+ */
+function timeStrToMinutes(str) {
+  const [h, m] = (str || '00:00').split(':').map(Number);
+  return h * 60 + m;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -246,7 +300,10 @@ router.get('/seats', async (req, res) => {
     bookingRows.forEach(row => {
       bookings[String(row.seat_number)] = {
         username:   row.staffId,
-        name:       row.staff_id ? row.staff_id.name : '',
+        // BUG FIX: If the Staff document was deleted (populate returns null),
+        // fall back to the stored staffId username so the name column is never
+        // left blank.
+        name:       row.staff_id ? row.staff_id.name : row.staffId,
         department: row.staff_id ? row.staff_id.department : '',
         time:       row.booking_time,
         date:       todayStr
@@ -296,11 +353,14 @@ router.get('/seats', async (req, res) => {
 
     const settingsDoc = await Settings.getSettings();
     const settings = {
-      id:          settingsDoc._id.toString(),
-      openTime:    settingsDoc.booking_start_time,
-      closeTime:   settingsDoc.booking_end_time,
-      resultsTime: settingsDoc.display_time,
-      totalSeats:  settingsDoc.total_seats
+      id:             settingsDoc._id.toString(),
+      openTime:       settingsDoc.booking_start_time,
+      closeTime:      settingsDoc.booking_end_time,
+      resultsTime:    settingsDoc.display_time,
+      totalSeats:     settingsDoc.total_seats,
+      // Session version — clients compare this to their stored copy.
+      // A mismatch means an admin has forced all sessions to expire.
+      sessionVersion: settingsDoc.session_version
     };
 
     res.json({ success: true, bookings, reservations, settings });
@@ -358,7 +418,66 @@ router.post('/bookSeat', async (req, res) => {
   const now            = new Date();
 
   try {
-    // ── Layer 1: Admin reservation guard ──────────────────────────────────
+    // ── Server-side booking window enforcement ─────────────────────────────
+    // Uses SERVER clock only. Client device time is completely ignored.
+    // Staff cannot bypass this by changing their phone/computer clock.
+    let settingsDoc;
+    try {
+      settingsDoc = await Settings.getSettings();
+    } catch (settingsErr) {
+      console.error('[bookSeat] Failed to load settings for time check:', settingsErr.message);
+      return res.status(503).json({ success: false, message: 'Could not verify booking window. Please try again.' });
+    }
+
+    const serverDay     = getServerLagosDayOfWeek();
+    const nowMinutes    = getServerLagosMinuteOfDay();
+    const openMins      = timeStrToMinutes(settingsDoc.booking_start_time);
+    const closeMins     = timeStrToMinutes(settingsDoc.booking_end_time);
+
+    if (serverDay === 0 || serverDay === 6) {
+      logBookingEvent('warn', 'BOOKING_TIME_REJECTED', {
+        staffId: staffIdLower, seatId: seatNum,
+        message: `Weekend booking attempt rejected by server (serverDay=${serverDay})`
+      });
+      SystemLog.create({
+        event_type: 'EARLY_BOOKING_ATTEMPT',
+        details:    `${staffIdLower} tried to book seat ${seatNum} on a weekend (serverDay=${serverDay}) at ${getServerISOTime()}`
+      }).catch(() => {});
+      return res.status(403).json({
+        success: false,
+        message: 'Booking is not available on weekends.'
+      });
+    }
+
+    if (nowMinutes < openMins) {
+      logBookingEvent('warn', 'EARLY_BOOKING_ATTEMPT', {
+        staffId: staffIdLower, seatId: seatNum,
+        message: `Early booking attempt — server ${nowMinutes}min, window opens ${openMins}min`
+      });
+      SystemLog.create({
+        event_type: 'EARLY_BOOKING_ATTEMPT',
+        details:    `${staffIdLower} tried to book seat ${seatNum} before open time. Server time: ${getServerISOTime()}, opens at ${settingsDoc.booking_start_time} WAT`
+      }).catch(() => {});
+      return res.status(403).json({
+        success: false,
+        message: `Booking window has not opened yet. It opens at ${settingsDoc.booking_start_time} (server time).`
+      });
+    }
+
+    if (nowMinutes >= closeMins) {
+      logBookingEvent('warn', 'BOOKING_TIME_REJECTED', {
+        staffId: staffIdLower, seatId: seatNum,
+        message: `Late booking attempt — server ${nowMinutes}min, window closed at ${closeMins}min`
+      });
+      SystemLog.create({
+        event_type: 'BOOKING_TIME_REJECTED',
+        details:    `${staffIdLower} tried to book seat ${seatNum} after close time. Server time: ${getServerISOTime()}, closed at ${settingsDoc.booking_end_time} WAT`
+      }).catch(() => {});
+      return res.status(403).json({
+        success: false,
+        message: `Booking has closed for today. It closed at ${settingsDoc.booking_end_time} (server time).`
+      });
+    }
     // Checked outside the transaction because reservation records change
     // rarely (admin action) and this read does not need to be serialised
     // with the booking write.
@@ -635,6 +754,80 @@ router.delete('/reservations', async (req, res) => {
     res.json({ success: true, message: `Reservation for Seat ${seatNum} removed.` });
   } catch (err) {
     console.error('Reservations DELETE error:', err);
+    res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/serverTime
+// Returns authoritative server time so the frontend can sync countdowns
+// and detect stale sessions — no auth required (read-only, non-sensitive).
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/serverTime', async (req, res) => {
+  try {
+    const now = new Date();
+    const lagosTime = now.toLocaleTimeString('en-GB', {
+      timeZone: 'Africa/Lagos',
+      hour:     '2-digit',
+      minute:   '2-digit',
+      second:   '2-digit',
+      hour12:   false
+    });
+    const lagosDate = now.toLocaleDateString('en-CA', { timeZone: 'Africa/Lagos' }); // YYYY-MM-DD
+
+    let sessionVersion = 1;
+    try {
+      const settingsDoc = await Settings.getSettings();
+      sessionVersion = settingsDoc.session_version || 1;
+    } catch (_) { /* non-fatal — return time even if DB is slow */ }
+
+    res.json({
+      success:        true,
+      serverTime:     now.toISOString(),
+      lagosTime,
+      lagosDate,
+      lagosDay:       getServerLagosDayOfWeek(),
+      sessionVersion
+    });
+  } catch (err) {
+    console.error('serverTime error:', err);
+    res.status(500).json({ success: false, message: 'Server error.' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/forceLogoutAll
+// Increments settings.session_version.  Every active client will detect the
+// version mismatch on their next /api/seats or /api/serverTime poll and be
+// logged out automatically.  NO user, booking, or history records are touched.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/forceLogoutAll', async (req, res) => {
+  try {
+    const settingsDoc = await Settings.getSettings();
+    settingsDoc.session_version = (settingsDoc.session_version || 1) + 1;
+    await settingsDoc.save();
+
+    const newVersion = settingsDoc.session_version;
+    const ts         = getServerISOTime();
+
+    logBookingEvent('info', 'SESSION_INVALIDATED', {
+      message: `All sessions invalidated by admin. New session_version=${newVersion} at ${ts}`
+    });
+
+    await SystemLog.create({
+      event_type: 'SESSION_INVALIDATED',
+      timestamp:  new Date(),
+      status:     'success',
+      details:    `Admin forced logout of all users. session_version bumped to ${newVersion} at ${ts}`
+    }).catch(e => console.error('[forceLogoutAll] SystemLog write failed:', e.message));
+
+    res.json({
+      success:        true,
+      message:        'All active sessions have been invalidated. Users will be logged out on their next page poll.',
+      sessionVersion: newVersion
+    });
+  } catch (err) {
+    console.error('forceLogoutAll error:', err);
     res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   }
 });

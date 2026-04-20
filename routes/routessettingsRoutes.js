@@ -12,11 +12,12 @@ router.get('/settings', async (req, res) => {
     res.json({
       success:  true,
       settings: {
-        id:          data._id.toString(),
-        openTime:    data.booking_start_time,
-        closeTime:   data.booking_end_time,
-        resultsTime: data.display_time,
-        totalSeats:  data.total_seats
+        id:             data._id.toString(),
+        openTime:       data.booking_start_time,
+        closeTime:      data.booking_end_time,
+        resultsTime:    data.display_time,
+        totalSeats:     data.total_seats,
+        sessionVersion: data.session_version || 1
       }
     });
   } catch (err) {

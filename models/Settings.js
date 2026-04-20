@@ -20,6 +20,13 @@ const settingsSchema = new mongoose.Schema(
       min: 1,
       max: 100,
     },
+    // Incremented by POST /api/forceLogoutAll to invalidate all active client sessions.
+    // Clients store this value in localStorage; mismatch → forced re-login.
+    session_version: {
+      type:    Number,
+      default: 1,
+      min:     1,
+    },
   },
   {
     timestamps: true,

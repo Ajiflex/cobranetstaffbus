@@ -16,7 +16,14 @@ const systemLogSchema = new mongoose.Schema({
       'TEMP_RESERVATION_EXPIRED',
       'BOOKING_MOVED_TO_HISTORY',
       'BOOKING_CONFLICT',
-      'SEAT_CONFLICT'
+      'SEAT_CONFLICT',
+      // New events added for production fixes
+      'EARLY_BOOKING_ATTEMPT',    // Staff tried to book before opening time
+      'BOOKING_TIME_REJECTED',    // Booking rejected by server-side time check
+      'SESSION_INVALIDATED',      // Admin forced all sessions to expire
+      'AUTH_FAILURE',             // Login attempt with wrong credentials
+      'BOOKING_ATTEMPT',          // Any seat booking attempt (success or fail)
+      'SEAT_RESERVATION_ACTION'   // Admin created / removed a seat reservation
     ],
     required: true,
     index:    true

@@ -1,6 +1,8 @@
-const express = require('express');
-const router  = express.Router();
-const Staff   = require('../models/Staff');
+const express    = require('express');
+const router     = express.Router();
+const Staff      = require('../models/Staff');
+const Settings   = require('../models/Settings');
+const SystemLog  = require('../models/SystemLog');
 
 // POST /api/login
 router.post('/login', async (req, res) => {
@@ -16,6 +18,11 @@ router.post('/login', async (req, res) => {
 
     const user = await Staff.findOne({ username: username.toLowerCase().trim() });
     if (!user) {
+      // Log auth failure — non-fatal, fire-and-forget
+      SystemLog.create({
+        event_type: 'AUTH_FAILURE',
+        details:    `Login failed — unknown username: ${username.toLowerCase().trim()}`
+      }).catch(() => {});
       return res.status(401).json({
         success: false,
         message: 'Invalid username or password.',
@@ -24,21 +31,34 @@ router.post('/login', async (req, res) => {
 
     const match = await user.comparePassword(password);
     if (!match) {
+      SystemLog.create({
+        event_type: 'AUTH_FAILURE',
+        details:    `Login failed — wrong password for: ${user.username}`
+      }).catch(() => {});
       return res.status(401).json({
         success: false,
         message: 'Invalid username or password.',
       });
     }
 
+    // Fetch current session_version so the client can store it and detect
+    // a forced-logout on their next poll.
+    let sessionVersion = 1;
+    try {
+      const settingsDoc = await Settings.getSettings();
+      sessionVersion = settingsDoc.session_version || 1;
+    } catch (_) { /* non-fatal */ }
+
     res.json({
       success: true,
       user: {
-        _id:          user._id,
-        name:         user.name,
-        username:     user.username,
-        department:   user.department || '',
-        role:         user.role,
-        mustChangePw: user.mustChangePw,
+        _id:            user._id,
+        name:           user.name,
+        username:       user.username,
+        department:     user.department || '',
+        role:           user.role,
+        mustChangePw:   user.mustChangePw,
+        sessionVersion,
       },
     });
   } catch (err) {
