@@ -40,6 +40,13 @@ let cachedReservations = [];
 let cachedUsers      = [];
 let cachedHistory    = [];
 
+// ── Server time synchronisation ─────────────────────────────────────────────
+// The difference between server UTC ms and local device ms.
+// Applied to Date.now() so all time-sensitive logic uses server time
+// regardless of device clock manipulation.
+let serverTimeOffset = 0;   // ms: serverTime - clientTime at last sync
+let serverLagosDay   = -1;  // server's current Lagos day-of-week (0=Sun…6=Sat), -1=unsynced
+
 // ═══════════════════════════════════════════════════════════════
 // API HELPER
 // ═══════════════════════════════════════════════════════════════
@@ -58,6 +65,41 @@ async function apiRequest(endpoint, method = 'GET', body = null) {
   } catch (err) {
     console.error(`API Error (${endpoint}):`, err);
     throw err;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SERVER TIME SYNC
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Returns the current time corrected to server time.
+ * Device clock manipulation has no effect — the offset anchors all
+ * comparisons to the server epoch regardless of local device settings.
+ */
+function getServerAdjustedTime() {
+  return new Date(Date.now() + serverTimeOffset);
+}
+
+/**
+ * Fetches /api/serverTime, computes the ms offset between server UTC and
+ * local device UTC, and caches the Lagos day-of-week from the server.
+ * Called once at startup then every 30 s so the offset stays fresh even
+ * if the user changes their device clock mid-session.
+ */
+async function syncServerTime() {
+  try {
+    const fetchStart = Date.now();
+    const data = await apiRequest('/serverTime', 'GET');
+    const fetchEnd = Date.now();
+    if (data && data.success && data.serverTime) {
+      const halfRtt    = Math.round((fetchEnd - fetchStart) / 2);
+      const serverMs   = new Date(data.serverTime).getTime();
+      serverTimeOffset = (serverMs + halfRtt) - Date.now();
+      serverLagosDay   = typeof data.lagosDay === 'number' ? data.lagosDay : -1;
+    }
+  } catch (err) {
+    console.warn('[syncServerTime] fetch failed — using cached offset:', serverTimeOffset, err.message);
   }
 }
 
@@ -220,6 +262,10 @@ async function doChangePassword() {
 
 async function loadAllData() {
   try {
+    // Establish server time offset FIRST so all subsequent state calculations
+    // use server time rather than the device clock.
+    await syncServerTime();
+
     // GET /api/seats runs expiry + validation server-side before returning
     const seatsData = await apiRequest('/seats', 'GET');
     if (seatsData.success) {
@@ -298,8 +344,11 @@ function goToDashboard() {
  * (from system_settings table — admin-configurable, no simulation override)
  */
 function getSystemState() {
-  const now = new Date();
-  const day = now.getDay();
+  // Use server-adjusted time — device clock manipulation has no effect.
+  const now = getServerAdjustedTime();
+  // Prefer the server-provided Lagos day-of-week; fall back to local only
+  // if we have never successfully synced (serverLagosDay === -1).
+  const day = serverLagosDay >= 0 ? serverLagosDay : now.getDay();
 
   // Skip weekends
   if (day === 0 || day === 6) return 'weekend';
@@ -323,7 +372,7 @@ function parseTimeStr(t) {
 }
 
 function msToNext(h, m) {
-  const now = new Date();
+  const now = getServerAdjustedTime();
   const t   = new Date(now);
   t.setHours(h, m, 0, 0);
   if (t <= now) t.setDate(t.getDate() + 1);
@@ -332,7 +381,7 @@ function msToNext(h, m) {
 
 /** Skips Saturday and Sunday (Friday → Monday countdown) */
 function msToNextWeekdayFriday(h, m) {
-  const now = new Date();
+  const now = getServerAdjustedTime();
   const t   = new Date(now);
   t.setHours(h, m, 0, 0);
   while (t <= now || t.getDay() === 0 || t.getDay() === 6)
@@ -437,14 +486,13 @@ async function refreshDashboard() {
 
 /** Returns the active reservation for a seat number, or null */
 function getReservationForSeat(seatNumber) {
-  const now  = new Date();
+  const now  = getServerAdjustedTime();
   const sNum = parseInt(seatNumber, 10);
 
   return cachedReservations.find(r => {
     if (r.seat !== sNum) return false;
     if (r.type === 'permanent') return true;
     if (r.type === 'temporary') {
-      // Only show if not yet expired
       return r.expiresAt ? new Date(r.expiresAt) > now : false;
     }
     return false;
@@ -453,7 +501,7 @@ function getReservationForSeat(seatNumber) {
 
 /** Returns list of seat numbers (as strings) that are currently reserved */
 function getActiveReservedSeats() {
-  const now = new Date();
+  const now = getServerAdjustedTime();
   return cachedReservations
     .filter(r => {
       if (r.type === 'permanent') return true;
@@ -499,7 +547,7 @@ function renderSeatGrid(bk, total, interactive) {
 
   const mine          = Object.entries(bk).find(([, v]) => v.username === currentUser?.username);
   const reservedSeats = getActiveReservedSeats();
-  const now           = new Date();
+  const now           = getServerAdjustedTime();
 
   for (let i = 1; i <= total; i++) {
     const sNum = String(i);
@@ -622,7 +670,7 @@ function formatResultsDate() {
   const days   = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
   const months = ['January','February','March','April','May','June',
                   'July','August','September','October','November','December'];
-  const d = new Date();
+  const d = getServerAdjustedTime();
   return days[d.getDay()] + ', ' + d.getDate() + ' ' + months[d.getMonth()] + ' ' + d.getFullYear();
 }
 
@@ -1076,9 +1124,7 @@ function exportPDF() {
   const { jsPDF } = window.jspdf;
   const doc  = new jsPDF();
   const bk   = cachedBookings;
-  const date = new Date().toISOString().split('T')[0];
-
-  doc.setFillColor(255, 130, 16);
+  const date = getServerAdjustedTime().toISOString().split('T')[0];
   doc.rect(0, 0, 210, 30, 'F');
   doc.setFontSize(18);
   doc.setTextColor(255, 255, 255);
@@ -1115,15 +1161,14 @@ function exportPDF() {
 
   doc.setFontSize(7);
   doc.setTextColor(170);
-  doc.text('Generated: ' + new Date().toLocaleString() + ' | Cobranet Limited', 14, 290);
+  doc.text('Generated: ' + getServerAdjustedTime().toLocaleString() + ' | Cobranet Limited', 14, 290);
   doc.save('cobranet-seats-' + date + '.pdf');
   showToast('PDF exported!', 'success');
 }
 
 function exportExcel() {
   const bk   = cachedBookings;
-  const date = new Date().toISOString().split('T')[0];
-  const rows = [['#', 'Seat No.', 'Staff Name', 'Username', 'Department', 'Time', 'Date']];
+  const date = getServerAdjustedTime().toISOString().split('T')[0];
 
   Object.entries(bk)
     .sort((a, b) => Number(a[0]) - Number(b[0]))
@@ -1215,8 +1260,7 @@ function renderReservationsList() {
   const count = document.getElementById('res-count');
   if (!list) return;
 
-  const now = new Date();
-  count.textContent = cachedReservations.length + ' reserved';
+  const now = getServerAdjustedTime();
 
   if (!cachedReservations.length) {
     empty.style.display = 'block';
@@ -1529,7 +1573,7 @@ let lastState       = null;
 let isResettingCycle = false;
 
 async function mainLoop() {
-  const now = new Date();
+  const now = getServerAdjustedTime();
   const ts  = now.toLocaleTimeString('en-GB');
 
   const dc = document.getElementById('dash-clock');
@@ -1663,7 +1707,12 @@ async function restoreSession(user) {
 // ═══════════════════════════════════════════════════════════════
 
 setInterval(mainLoop, 1000);
-mainLoop();
+// Re-sync server time offset every 30 s so device clock changes are corrected.
+setInterval(syncServerTime, 30000);
+
+// Perform an initial server time sync BEFORE the first mainLoop tick so that
+// getSystemState() never uses a stale (device) clock on first render.
+syncServerTime().then(() => mainLoop());
 
 (function initSession() {
   try {
