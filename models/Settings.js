@@ -33,12 +33,33 @@ const settingsSchema = new mongoose.Schema(
   }
 );
 
+// ─────────────────────────────────────────────────────────────────────────────
+// IN-MEMORY SETTINGS CACHE
+// Reduces repeated MongoDB reads on every /seats and /serverTime poll.
+// Cache TTL: 5 minutes. Call Settings.clearCache() after any save() to ensure
+// the next read fetches fresh data from MongoDB.
+// ─────────────────────────────────────────────────────────────────────────────
+let _settingsCache   = null;
+let _settingsCacheAt = 0;
+const CACHE_TTL_MS   = 5 * 60 * 1000; // 5 minutes
+
 settingsSchema.statics.getSettings = async function () {
+  const now = Date.now();
+  if (_settingsCache && (now - _settingsCacheAt) < CACHE_TTL_MS) {
+    return _settingsCache;
+  }
   let settings = await this.findOne();
   if (!settings) {
     settings = await this.create({});
   }
+  _settingsCache   = settings;
+  _settingsCacheAt = now;
   return settings;
+};
+
+settingsSchema.statics.clearCache = function () {
+  _settingsCache   = null;
+  _settingsCacheAt = 0;
 };
 
 settingsSchema.set('toJSON', {
