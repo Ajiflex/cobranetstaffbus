@@ -131,8 +131,11 @@ async function doLogin() {
         department:     currentUser.department || '',
         role:           currentUser.role,
         mustChangePw:   currentUser.mustChangePw || false,
-        sessionVersion: currentUser.sessionVersion || 1
+        sessionVersion: currentUser.sessionVersion || 1,
+        loginTime:      Date.now()
       }));
+
+      resetSessionTimeout();
 
       document.getElementById('login-error').classList.add('hidden');
       document.getElementById('login-user').value = '';
@@ -173,6 +176,7 @@ async function afterLogin() {
 function doLogout() {
   // Clear persisted session
   localStorage.removeItem('cobranet_user');
+  if (_sessionTimeoutTimer) { clearTimeout(_sessionTimeoutTimer); _sessionTimeoutTimer = null; }
   currentUser    = null;
   cachedBookings = {};
   cachedUsers    = [];
@@ -1655,13 +1659,13 @@ async function mainLoop() {
 
       if (!isResettingCycle) refreshDashboard();
 
-    } else if (state === 'open' && now.getSeconds() % 5 === 0) {
+    } else if (state === 'open') {
       // Ensure systemStatus is reset while booking is open so the verification
       // flow triggers cleanly when booking closes.
       if (systemStatus !== 'BOOKING_OPEN') systemStatus = 'BOOKING_OPEN';
       refreshDashboard();
 
-    } else if (state === 'results' && now.getSeconds() % 5 === 0) {
+    } else if (state === 'results') {
       // Periodic safety refresh during results window (BUG 2 fix retained).
       refreshDashboard();
     }
@@ -1669,10 +1673,8 @@ async function mainLoop() {
 
   // ── Admin dashboard ─────────────────────────────────────────────────
   if (document.getElementById('page-admin').classList.contains('active') && currentUser) {
-    if (now.getSeconds() % 10 === 0) {
-      refreshAdminStats();
-      renderAdminBookings();
-    }
+    refreshAdminStats();
+    renderAdminBookings();
   }
 }
 
@@ -1692,9 +1694,15 @@ document.addEventListener('keydown', e => {
 // ═══════════════════════════════════════════════════════════════
 
 async function restoreSession(user) {
+  // Check if the persisted session has exceeded the 1-hour timeout
+  if (user.loginTime && (Date.now() - user.loginTime) > SESSION_TIMEOUT_MS) {
+    localStorage.removeItem('cobranet_user');
+    return; // show login page
+  }
   currentUser = user;
   // Ensure sessionVersion is always a number on the restored object
   if (!currentUser.sessionVersion) currentUser.sessionVersion = 1;
+  resetSessionTimeout();
   if (currentUser.mustChangePw) {
     showPage('page-change-password');
     return;
@@ -1706,9 +1714,56 @@ async function restoreSession(user) {
 // INITIALIZATION
 // ═══════════════════════════════════════════════════════════════
 
-setInterval(mainLoop, 1000);
-// Re-sync server time offset every 30 s so device clock changes are corrected.
-setInterval(syncServerTime, 30000);
+setInterval(mainLoop, 7000);
+// Re-sync server time offset every 5 minutes — device clock changes are still corrected promptly.
+setInterval(syncServerTime, 300000);
+
+// ── Tab visibility optimisation ──────────────────────────────────────────────
+// Pause non-critical polling when the browser tab is hidden to avoid
+// unnecessary Vercel wakeups and MongoDB activity from inactive tabs.
+let _mainLoopInterval    = null;
+let _syncTimeInterval    = null;
+
+function startPolling() {
+  if (_mainLoopInterval) clearInterval(_mainLoopInterval);
+  if (_syncTimeInterval) clearInterval(_syncTimeInterval);
+  _mainLoopInterval = setInterval(mainLoop,       7000);
+  _syncTimeInterval = setInterval(syncServerTime, 300000);
+}
+
+function stopPolling() {
+  if (_mainLoopInterval) { clearInterval(_mainLoopInterval); _mainLoopInterval = null; }
+  if (_syncTimeInterval) { clearInterval(_syncTimeInterval); _syncTimeInterval = null; }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    // Tab went to background — stop polling.
+    // Active booking flows (grace period, verification) own their own timers
+    // and are not affected by this.
+    stopPolling();
+  } else {
+    // Tab became visible again — re-sync time and restart polling.
+    syncServerTime().then(() => mainLoop());
+    startPolling();
+  }
+});
+
+// ── 1-hour session timeout ───────────────────────────────────────────────────
+// Automatically expire the session after 1 hour to avoid keeping Vercel
+// active continuously for users who left the tab open.
+const SESSION_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour
+let _sessionTimeoutTimer = null;
+
+function resetSessionTimeout() {
+  if (_sessionTimeoutTimer) clearTimeout(_sessionTimeoutTimer);
+  _sessionTimeoutTimer = setTimeout(() => {
+    if (currentUser) {
+      doLogout();
+      showToast('⏱️ Your session has expired. Please log in again.', 'error');
+    }
+  }, SESSION_TIMEOUT_MS);
+}
 
 // Perform an initial server time sync BEFORE the first mainLoop tick so that
 // getSystemState() never uses a stale (device) clock on first render.
