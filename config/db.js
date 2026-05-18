@@ -20,10 +20,11 @@ const mongoose = require('mongoose');
 // ─────────────────────────────────────────────────────────────────────────────
 
 const POOL_OPTIONS = {
-  maxPoolSize:              10,
-  minPoolSize:               2,
+  maxPoolSize:              5,
+  minPoolSize:              0,
   serverSelectionTimeoutMS: 5000,
   socketTimeoutMS:          45000,
+  connectTimeoutMS:         10000,
 };
 
 const connectDB = async () => {
