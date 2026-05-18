@@ -46,6 +46,7 @@ router.post('/settings', async (req, res) => {
     settings.display_time       = resultsTime;
     settings.total_seats        = parseInt(totalSeats, 10);
     await settings.save();
+    Settings.clearCache(); // force fresh read on next poll
 
     // Archive all existing bookings to history before clearing them
     const { archived, deleted } = await archiveAndDeleteBookings({}, 'settings_change');
@@ -79,7 +80,8 @@ router.post('/settings', async (req, res) => {
 router.get('/history', async (req, res) => {
   try {
     const data = await BookingHistory.find({})
-      .sort({ bookingDate: -1, seatId: 1 });
+      .sort({ bookingDate: -1, seatId: 1 })
+      .lean();
 
     const flatHistory = data.map(row => ({
       date:       row.bookingDate.toISOString().split('T')[0],

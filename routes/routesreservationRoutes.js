@@ -89,8 +89,20 @@ function logBookingEvent(level, event, { staffId, seatId, message, extra } = {})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TEMPORARY RESERVATION EXPIRY CLEANUP
-//
+// RATE-LIMIT CLEANUP: only run expired reservation cleanup at most once per
+// 2 minutes across all requests — avoids hammering MongoDB on every poll.
+// ─────────────────────────────────────────────────────────────────────────────
+let _lastCleanupAt       = 0;
+const CLEANUP_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+
+async function maybeCleanupExpiredReservations() {
+  const now = Date.now();
+  if (now - _lastCleanupAt < CLEANUP_INTERVAL_MS) return;
+  _lastCleanupAt = now;
+  await cleanupExpiredTemporaryReservations();
+}
+
+
 // Called from GET /seats so expired admin reservations are freed before the
 // seat map is rendered. NOT called inside bookSeat — the reservation check
 // inside bookSeat uses `expires_at: { $gt: now }` which already excludes
@@ -284,25 +296,24 @@ router.post('/verifySeatAllocations', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/seats', async (req, res) => {
   try {
-    // Free expired admin reservations before building the seat map
-    await cleanupExpiredTemporaryReservations();
-    // Sweep for any duplicates left by previous concurrency edge cases
-    await cleanupDuplicateBookings();
+    // Free expired admin reservations — throttled to run at most every 2 minutes
+    // instead of on every single poll request.
+    await maybeCleanupExpiredReservations();
+    // NOTE: cleanupDuplicateBookings() is NOT called here on every poll — it is a
+    // full collection scan. It runs only via POST /verifySeatAllocations which the
+    // frontend calls exactly once when the booking window closes.
 
     const { start: todayStart, end: todayEnd } = getTodayRange();
     const todayStr = todayStart.toISOString().split('T')[0];
 
     const bookingRows = await DailyBooking.find({
       booking_date: { $gte: todayStart, $lt: todayEnd }
-    }).populate('staff_id', 'name username department');
+    }).populate('staff_id', 'name username department').lean();
 
     const bookings = {};
     bookingRows.forEach(row => {
       bookings[String(row.seat_number)] = {
         username:   row.staffId,
-        // BUG FIX: If the Staff document was deleted (populate returns null),
-        // fall back to the stored staffId username so the name column is never
-        // left blank.
         name:       row.staff_id ? row.staff_id.name : row.staffId,
         department: row.staff_id ? row.staff_id.department : '',
         time:       row.booking_time,
@@ -317,7 +328,7 @@ router.get('/seats', async (req, res) => {
         { reservation_type: 'permanent' },
         { reservation_type: 'temporary', expires_at: { $gt: now } }
       ]
-    });
+    }).lean();
 
     const reservations = resRows.map(r => ({
       _id:         r._id.toString(),
@@ -334,7 +345,7 @@ router.get('/seats', async (req, res) => {
       const sNum = String(r.seat_number);
       if (!bookings[sNum]) {
         const reservedTime = r.reserved_at
-          ? r.reserved_at.toLocaleTimeString('en-GB', {
+          ? new Date(r.reserved_at).toLocaleTimeString('en-GB', {
               hour: '2-digit', minute: '2-digit', second: '2-digit',
               hour12: false, timeZone: 'Africa/Lagos'
             })
@@ -358,8 +369,6 @@ router.get('/seats', async (req, res) => {
       closeTime:      settingsDoc.booking_end_time,
       resultsTime:    settingsDoc.display_time,
       totalSeats:     settingsDoc.total_seats,
-      // Session version — clients compare this to their stored copy.
-      // A mismatch means an admin has forced all sessions to expire.
       sessionVersion: settingsDoc.session_version
     };
 
@@ -439,10 +448,6 @@ router.post('/bookSeat', async (req, res) => {
         staffId: staffIdLower, seatId: seatNum,
         message: `Weekend booking attempt rejected by server (serverDay=${serverDay})`
       });
-      SystemLog.create({
-        event_type: 'EARLY_BOOKING_ATTEMPT',
-        details:    `${staffIdLower} tried to book seat ${seatNum} on a weekend (serverDay=${serverDay}) at ${getServerISOTime()}`
-      }).catch(() => {});
       return res.status(403).json({
         success: false,
         message: 'Booking is not available on weekends.'
@@ -454,10 +459,6 @@ router.post('/bookSeat', async (req, res) => {
         staffId: staffIdLower, seatId: seatNum,
         message: `Early booking attempt — server ${nowMinutes}min, window opens ${openMins}min`
       });
-      SystemLog.create({
-        event_type: 'EARLY_BOOKING_ATTEMPT',
-        details:    `${staffIdLower} tried to book seat ${seatNum} before open time. Server time: ${getServerISOTime()}, opens at ${settingsDoc.booking_start_time} WAT`
-      }).catch(() => {});
       return res.status(403).json({
         success: false,
         message: `Booking window has not opened yet. It opens at ${settingsDoc.booking_start_time} (server time).`
@@ -469,10 +470,6 @@ router.post('/bookSeat', async (req, res) => {
         staffId: staffIdLower, seatId: seatNum,
         message: `Late booking attempt — server ${nowMinutes}min, window closed at ${closeMins}min`
       });
-      SystemLog.create({
-        event_type: 'BOOKING_TIME_REJECTED',
-        details:    `${staffIdLower} tried to book seat ${seatNum} after close time. Server time: ${getServerISOTime()}, closed at ${settingsDoc.booking_end_time} WAT`
-      }).catch(() => {});
       return res.status(403).json({
         success: false,
         message: `Booking has closed for today. It closed at ${settingsDoc.booking_end_time} (server time).`
@@ -628,7 +625,7 @@ router.post('/bookSeat', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/reservations', async (req, res) => {
   try {
-    await cleanupExpiredTemporaryReservations();
+    await maybeCleanupExpiredReservations();
 
     const now  = new Date();
     const data = await Reservation.find({
@@ -637,7 +634,7 @@ router.get('/reservations', async (req, res) => {
         { reservation_type: 'permanent' },
         { reservation_type: 'temporary', expires_at: { $gt: now } }
       ]
-    });
+    }).lean();
 
     const reservations = data.map(r => ({
       _id:         r._id.toString(),
@@ -645,9 +642,9 @@ router.get('/reservations', async (req, res) => {
       label:       r.label,
       type:        r.reservation_type,
       status:      r.status,
-      expiresDate: r.expires_at ? r.expires_at.toISOString().split('T')[0] : null,
-      expiresAt:   r.expires_at ? r.expires_at.toISOString() : null,
-      reservedAt:  r.reserved_at.toISOString()
+      expiresDate: r.expires_at ? new Date(r.expires_at).toISOString().split('T')[0] : null,
+      expiresAt:   r.expires_at ? new Date(r.expires_at).toISOString() : null,
+      reservedAt:  new Date(r.reserved_at).toISOString()
     }));
 
     res.json({ success: true, reservations });
@@ -681,7 +678,7 @@ router.post('/reservations', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid seat number.' });
     }
 
-    await cleanupExpiredTemporaryReservations();
+    await maybeCleanupExpiredReservations();
 
     const now      = new Date();
     const existing = await Reservation.findOne({
@@ -691,7 +688,7 @@ router.post('/reservations', async (req, res) => {
         { reservation_type: 'permanent' },
         { reservation_type: 'temporary', expires_at: { $gt: now } }
       ]
-    });
+    }).lean();
 
     if (existing) {
       return res.status(409).json({
@@ -806,6 +803,7 @@ router.post('/forceLogoutAll', async (req, res) => {
     const settingsDoc = await Settings.getSettings();
     settingsDoc.session_version = (settingsDoc.session_version || 1) + 1;
     await settingsDoc.save();
+    Settings.clearCache(); // invalidate cache so next poll sees new version
 
     const newVersion = settingsDoc.session_version;
     const ts         = getServerISOTime();

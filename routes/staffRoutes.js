@@ -107,7 +107,7 @@ router.post('/changePassword', async (req, res) => {
 // GET /api/staff — list all staff
 router.get('/staff', async (req, res) => {
   try {
-    const staff = await Staff.find().sort({ name: 1 });
+    const staff = await Staff.find().sort({ name: 1 }).lean();
     res.json({ success: true, users: staff });
   } catch (err) {
     console.error('Staff GET error:', err);
