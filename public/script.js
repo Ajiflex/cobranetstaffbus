@@ -1576,27 +1576,55 @@ async function runVerificationFlow() {
 let lastState       = null;
 let isResettingCycle = false;
 
-async function mainLoop() {
+// ═══════════════════════════════════════════════════════════════
+// COUNTDOWN TICK  — runs every 1 second, no API/DB calls
+//
+// Owns:
+//   • dash-clock / admin-clock display
+//   • countdown-display  (before_open | reset | weekend states)
+//
+// mainLoop (7 s) handles state transitions and server polling.
+// This function is pure local computation using cached state and
+// the server-adjusted time offset so there is zero backend load.
+// ═══════════════════════════════════════════════════════════════
+
+function countdownTick() {
+  // ── Clock display ────────────────────────────────────────────
   const now = getServerAdjustedTime();
   const ts  = now.toLocaleTimeString('en-GB');
-
-  const dc = document.getElementById('dash-clock');
-  const ac = document.getElementById('admin-clock');
+  const dc  = document.getElementById('dash-clock');
+  const ac  = document.getElementById('admin-clock');
   if (dc) dc.textContent = ts;
   if (ac) ac.textContent = ts;
 
+  // ── Countdown display (staff dashboard only) ─────────────────
+  if (!currentUser) return;
+  if (!document.getElementById('page-dashboard').classList.contains('active')) return;
+
+  // Only update countdown when it is actually visible and we are
+  // not inside the verification or grace-period flow (those own
+  // their own timers).
+  const countdownSection = document.getElementById('countdown-section');
+  if (!countdownSection || countdownSection.classList.contains('hidden')) return;
+  if (systemStatus === 'VERIFYING' || systemStatus === 'GRACE_PERIOD') return;
+
+  const state = getSystemState();
+  if (state === 'before_open' || state === 'reset' || state === 'weekend') {
+    const s      = cachedSettings;
+    const { h, m } = parseTimeStr(s.openTime || '16:50');
+    const ms     = state === 'before_open'
+      ? msToNext(h, m)
+      : msToNextWeekdayFriday(h, m);
+    const el = document.getElementById('countdown-display');
+    if (el) el.textContent = formatCountdown(ms);
+  }
+}
+
+async function mainLoop() {
   const state = getSystemState();
 
   // ── Staff dashboard ─────────────────────────────────────────────────
   if (document.getElementById('page-dashboard').classList.contains('active') && currentUser) {
-
-    if (state === 'before_open' || state === 'reset' || state === 'weekend') {
-      const s = cachedSettings;
-      const { h, m } = parseTimeStr(s.openTime || '16:50');
-      const ms = state === 'before_open' ? msToNext(h, m) : msToNextWeekdayFriday(h, m);
-      const el = document.getElementById('countdown-display');
-      if (el) el.textContent = formatCountdown(ms);
-    }
 
     // If runVerificationFlow is actively running, it owns the display.
     // Do not allow mainLoop to overwrite the verification or grace screens.
@@ -1714,37 +1742,48 @@ async function restoreSession(user) {
 // INITIALIZATION
 // ═══════════════════════════════════════════════════════════════
 
-setInterval(mainLoop, 7000);
-// Re-sync server time offset every 5 minutes — device clock changes are still corrected promptly.
-setInterval(syncServerTime, 300000);
-
 // ── Tab visibility optimisation ──────────────────────────────────────────────
-// Pause non-critical polling when the browser tab is hidden to avoid
+// Pause non-critical backend polling when the browser tab is hidden to avoid
 // unnecessary Vercel wakeups and MongoDB activity from inactive tabs.
+// The 1-second countdown tick is also paused when hidden (no API calls, but
+// avoids accumulating drift and wasted CPU in background tabs).
 let _mainLoopInterval    = null;
 let _syncTimeInterval    = null;
+let _countdownInterval   = null;   // 1-second local tick — no API calls
 
 function startPolling() {
-  if (_mainLoopInterval) clearInterval(_mainLoopInterval);
-  if (_syncTimeInterval) clearInterval(_syncTimeInterval);
-  _mainLoopInterval = setInterval(mainLoop,       7000);
-  _syncTimeInterval = setInterval(syncServerTime, 300000);
+  // Clear any existing intervals before creating new ones to prevent duplicates.
+  if (_mainLoopInterval)  clearInterval(_mainLoopInterval);
+  if (_syncTimeInterval)  clearInterval(_syncTimeInterval);
+  if (_countdownInterval) clearInterval(_countdownInterval);
+
+  // Backend poll: every 7 seconds (state transitions, session checks).
+  _mainLoopInterval  = setInterval(mainLoop,       7000);
+  // Server time re-sync: every 5 minutes (keeps offset fresh).
+  _syncTimeInterval  = setInterval(syncServerTime, 300000);
+  // UI countdown tick: every 1 second — pure local computation, zero backend load.
+  _countdownInterval = setInterval(countdownTick,  1000);
 }
 
 function stopPolling() {
-  if (_mainLoopInterval) { clearInterval(_mainLoopInterval); _mainLoopInterval = null; }
-  if (_syncTimeInterval) { clearInterval(_syncTimeInterval); _syncTimeInterval = null; }
+  if (_mainLoopInterval)  { clearInterval(_mainLoopInterval);  _mainLoopInterval  = null; }
+  if (_syncTimeInterval)  { clearInterval(_syncTimeInterval);   _syncTimeInterval   = null; }
+  if (_countdownInterval) { clearInterval(_countdownInterval);  _countdownInterval  = null; }
 }
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
-    // Tab went to background — stop polling.
+    // Tab went to background — stop all polling.
     // Active booking flows (grace period, verification) own their own timers
     // and are not affected by this.
     stopPolling();
   } else {
-    // Tab became visible again — re-sync time and restart polling.
-    syncServerTime().then(() => mainLoop());
+    // Tab became visible again — re-sync server time, fire an immediate tick
+    // and main-loop update, then restart all intervals cleanly.
+    syncServerTime().then(() => {
+      countdownTick();
+      mainLoop();
+    });
     startPolling();
   }
 });
@@ -1767,7 +1806,14 @@ function resetSessionTimeout() {
 
 // Perform an initial server time sync BEFORE the first mainLoop tick so that
 // getSystemState() never uses a stale (device) clock on first render.
-syncServerTime().then(() => mainLoop());
+// startPolling() creates all three managed intervals cleanly — no duplicate
+// untracked intervals.  countdownTick() fires immediately so the clock and
+// countdown are visible at once without waiting for the first 7-second tick.
+syncServerTime().then(() => {
+  countdownTick();  // immediate UI render — no API call
+  mainLoop();
+  startPolling();
+});
 
 (function initSession() {
   try {
